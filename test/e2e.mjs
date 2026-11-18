@@ -741,6 +741,31 @@ try {
     monacoWrite.ok === true && monacoWrite.result?.verified === true && flat(monacoAfterWrite.editor?.text || '').trimEnd() === flat(monacoTypedText).trimEnd(),
     monacoWrite.ok ? `method=${monacoWrite.result?.method} verified=${monacoWrite.result?.verified} text=${JSON.stringify(flat(monacoAfterWrite.editor?.text || '').slice(0, 24))}` : `${monacoWrite.code}: ${monacoWrite.error}`);
 
+  // ---- 17b. 覆盖写入前先备份原文，写坏了能一键恢复
+  const undoSession = await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/monaco-dom.html`, 'undo');
+  await sleep(1000);
+  await cdp.send('Page.bringToFront', {}, undoSession);
+  const undoOriginal = await evaluateOn(undoSession, 'window.__monacoCode()');
+  const undoPopup = await openPage(`chrome-extension://${extensionId}/popup.html`, 'undo-popup');
+  await sleep(1100);
+  const undoEval = (expression) => evaluateOn(undoPopup, expression);
+  await cdp.send('Page.bringToFront', {}, undoPopup);
+  await undoEval(`(() => { document.getElementById('pasteInput').value = 'print("overwrite test");'; return true; })()`);
+  await undoEval(`(() => { document.getElementById('pasteBtn').click(); return true; })()`);
+  await sleep(6000);
+  const afterWrite = await evaluateOn(undoSession, 'window.__monacoCode()');
+  const undoVisible = await undoEval(`!document.getElementById('undoBtn').classList.contains('hidden')`);
+  check('覆盖写入前先备份原文，撤销按钮出现',
+    undoVisible === true && String(afterWrite).includes('overwrite test'),
+    `undoVisible=${undoVisible} 写入结果=${JSON.stringify(String(afterWrite).slice(0, 28))}`);
+
+  await undoEval(`(() => { document.getElementById('undoBtn').click(); return true; })()`);
+  await sleep(6000);
+  const restoredCode = await evaluateOn(undoSession, 'window.__monacoCode()');
+  check('“恢复写入前的代码”能把原代码写回去',
+    flat(restoredCode).trim() === flat(undoOriginal).trim(),
+    `恢复 ${String(restoredCode).length} / 原 ${String(undoOriginal).length} 字符`);
+
   // ---- 17. 点不到编辑器时必须明确报错，而不是偷偷复制“屏幕上可见的几行”
   const overlaySession = await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/monaco-blocked.html`, 'blocked');
   await sleep(900);

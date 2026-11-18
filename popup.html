@@ -51,13 +51,14 @@
       <textarea id="pasteInput" class="editor-view" spellcheck="false" placeholder="把本地代码粘到这里，或用下面的按钮直接从剪贴板取"></textarea>
       <div class="row">
         <button id="clipBtn" class="btn">读取剪贴板</button>
-        <label class="check"><input id="replaceAll" type="checkbox" checked> 先全选覆盖</label>
+        <label class="check" title="勾选后写入前会先 Ctrl+A 全选，用新代码替换整篇"><input id="replaceAll" type="checkbox" checked> 先全选覆盖（会清空原代码）</label>
         <label class="check"><input id="typeKeys" type="checkbox"> 逐字键入（兼容更严格）</label>
       </div>
       <button id="pasteBtn" class="btn primary block">写入网页编辑器</button>
       <div class="row">
         <button id="forcePasteBtn" class="btn tiny">强制写入（Ctrl+V）</button>
         <button id="typeWriteBtn" class="btn tiny">逐字键入写入（模拟打字）</button>
+        <button id="undoBtn" class="btn tiny hidden">恢复写入前的代码</button>
       </div>
       <p class="hint">代码区读不到、编辑器找不到时用“强制写入”；平台提示“禁止复制粘贴”时用“逐字键入”。</p>
       <p id="pasteResult" class="meta"></p>

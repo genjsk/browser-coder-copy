@@ -22,6 +22,7 @@ const els = {
   pasteBtn: $('pasteBtn'),
   forcePasteBtn: $('forcePasteBtn'),
   typeWriteBtn: $('typeWriteBtn'),
+  undoBtn: $('undoBtn'),
   pasteResult: $('pasteResult'),
   evalInput: $('evalInput'),
   evalBtn: $('evalBtn'),
@@ -537,6 +538,44 @@ async function typeWrite() {
   setDot('ok', '已键入');
 }
 
+// 覆盖写入是破坏性操作：动手前先把页面上的原文读一份下来，
+// 写入后校验不一致就自动写回去，平时也能用“恢复写入前的代码”手动撤销。
+let writeBackup = null;
+
+async function snapshotBeforeWrite(replace) {
+  if (!replace || !settings.debugConsent) return null;
+  try {
+    const before = await readPageViaKeyboard();
+    if (before.ok && before.text && before.text.trim()) return before.text;
+  } catch {}
+  return null;
+}
+
+async function showUndo() {
+  els.undoBtn.classList.toggle('hidden', !writeBackup);
+}
+
+async function undoWrite() {
+  if (!writeBackup) return;
+  if (!settings.debugConsent) {
+    els.consentBanner.classList.remove('hidden');
+    return;
+  }
+  els.undoBtn.disabled = true;
+  setMeta(els.pasteResult, '正在恢复写入前的代码…');
+  const restored = await request({ type: 'keytype', text: writeBackup, spec: choice, replace: true });
+  els.undoBtn.disabled = false;
+  if (restored.ok) {
+    setMeta(els.pasteResult, `已恢复写入前的代码（${writeBackup.length} 字符）。`, 'ok');
+    setDot('ok', '已恢复原代码');
+    writeBackup = null;
+    await showUndo();
+  } else {
+    setMeta(els.pasteResult, `恢复失败：${describeFailure(restored)}`, 'err');
+    setDot('warn', '恢复失败');
+  }
+}
+
 async function pasteIn() {
   const text = els.pasteInput.value;
   if (!text.trim()) {
@@ -550,6 +589,8 @@ async function pasteIn() {
   }
   els.pasteBtn.disabled = true;
   setMeta(els.pasteResult, '正在写入…（页面会自动切到前台）');
+  writeBackup = await snapshotBeforeWrite(els.replaceAll.checked);
+  await showUndo();
   const response = await request({
     type: 'paste',
     text,
@@ -576,6 +617,20 @@ async function pasteIn() {
     verified,
     result.warning
   ].filter(Boolean);
+  if (result.verified === false && writeBackup) {
+    // 覆盖后内容和预期对不上（常常只写进去一部分），先把原文写回去，别把用户的代码弄丢。
+    setMeta(els.pasteResult, `${parts.join(' · ')}。内容对不上，正在恢复写入前的代码…`, 'warn');
+    const restored = await request({ type: 'keytype', text: writeBackup, spec: choice, replace: true });
+    if (restored.ok) {
+      setMeta(els.pasteResult, `${parts.join(' · ')}。已自动恢复写入前的代码（${writeBackup.length} 字符）。`, 'ok');
+      setDot('ok', '写入未通过校验，已恢复原代码');
+      writeBackup = null;
+      await showUndo();
+    } else {
+      setDot('warn', '写入校验不一致，恢复也失败');
+    }
+    return;
+  }
   setMeta(els.pasteResult, parts.join(' · '), result.verified === false ? 'warn' : 'ok');
   setDot(result.verified === false ? 'warn' : 'ok', result.verified === false ? '已写入但校验不一致' : '写入成功');
   if (result.verified !== false) refreshPage();
@@ -666,6 +721,7 @@ function bind() {
   els.forceReadBtn.addEventListener('click', forceReadByKeyboard);
   els.forcePasteBtn.addEventListener('click', forcePasteByKeyboard);
   els.typeWriteBtn.addEventListener('click', typeWrite);
+  els.undoBtn.addEventListener('click', undoWrite);
   els.clipBtn.addEventListener('click', readClipboard);
   els.pasteBtn.addEventListener('click', pasteIn);
   els.evalBtn.addEventListener('click', runScript);

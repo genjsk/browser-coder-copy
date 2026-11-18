@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Monaco DOM（没有 window.monaco，只有渲染出来的行）</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 16px; background: #1e1e1e; color: #ddd; }
+  h1 { font-size: 15px; }
+  p { color: #999; font-size: 12px; }
+  .monaco-editor { position: relative; width: 640px; height: 190px; background: #1e1e1e; border: 1px solid #3c3c3c; overflow: hidden; }
+  .view-lines { position: absolute; inset: 0 90px 0 0; padding: 8px 10px; font: 13px/20px ui-monospace, Consolas, monospace; white-space: pre; }
+  .view-line { height: 20px; }
+  .minimap-decorations-layer { position: absolute; top: 0; right: 0; width: 90px; height: 190px; background: #252526; }
+  .inputarea { position: absolute; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; }
+</style>
+</head>
+<body>
+<h1>Monaco 形态：window.monaco 不存在，代码只存在于渲染行里</h1>
+<p>页面的 Ctrl+A / Ctrl+C 只在焦点进了编辑器内部 textarea 后才工作；点到右侧 minimap 上则只选中页面 DOM，复制出来就是“前几行”。</p>
+
+<div class="monaco-editor" id="editor">
+  <div class="view-lines">
+    <div class="view-line">class Monaco {</div>
+    <div class="view-line">  public static void main(String[] a) {</div>
+    <div class="view-line">    System.out.println("monaco");</div>
+    <div class="view-line">  }</div>
+    <div class="view-line">}</div>
+  </div>
+  <canvas class="minimap-decorations-layer" width="90" height="190"></canvas>
+  <textarea class="inputarea monaco-mouse-cursor-text" spellcheck="false"></textarea>
+</div>
+
+<script>
+  let code = 'class Monaco {\n  public static void main(String[] a) {\n    System.out.println("monaco");\n  }\n}\n';
+  const editor = document.getElementById('editor');
+  const linesEl = editor.querySelector('.view-lines');
+  const input = editor.querySelector('textarea');
+  let selectedAll = false;
+
+  const render = () => {
+    linesEl.innerHTML = code
+      .split('\n')
+      .map((line) => `<div class="view-line">${line.replace(/&/g, '&amp;').replace(/</g, '&lt;') || '&#8203;'}</div>`)
+      .join('');
+  };
+  render();
+
+  window.__monacoCode = () => code;
+  window.__monacoState = () => ({ focused: document.activeElement === input, selectedAll });
+  window.__monacoPasted = '';
+
+  // 真实 Monaco 会在 mousedown 里 preventDefault 再聚焦自己的输入框；不 preventDefault
+  // 的话，浏览器默认动作会在聚焦之后又把焦点挪回 body。
+  editor.addEventListener('mousedown', (event) => { event.preventDefault(); input.focus(); }, true);
+
+  document.addEventListener('keydown', (event) => {
+    const key = String(event.key || '');
+    if (event.ctrlKey || event.metaKey) {
+      const lower = key.toLowerCase();
+      if (lower === 'a') {
+        event.preventDefault();
+        selectedAll = document.activeElement === input;
+      }
+      if (lower === 'c') {
+        event.preventDefault();
+        if (document.activeElement === input && selectedAll) {
+          navigator.clipboard.writeText(code).catch(() => {});
+        } else {
+          // 没进编辑器时，浏览器原生复制只能拿到视口里渲染出来的几行。
+          navigator.clipboard.writeText(linesEl.innerText).catch(() => {});
+        }
+      }
+      if (lower === 'v') {
+        event.preventDefault();
+        navigator.clipboard.readText().then((text) => {
+          window.__monacoPasted = text;
+          code = text;
+          selectedAll = false;
+          render();
+        }).catch(() => {});
+      }
+      return;
+    }
+    if (document.activeElement !== input) return;
+    if (key.length !== 1) return;
+    event.preventDefault();
+    code = selectedAll ? key : code + key;
+    selectedAll = false;
+    render();
+  }, true);
+</script>
+</body>
+</html>

@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>双编辑器夹具（代码区 + 自定义测试用例）</title>
+  <!--
+    复现头歌页面的真实结构：页面上不止一个 CodeMirror 实例。
+    上面小框是“自定义测试用例”输入框（3 个字符），下面大框才是代码编辑区。
+    扩展必须按“可见、字符数、面积”综合打分选中代码区，而不是按类型取第一个。
+  -->
+  <style>
+    body { margin: 0; font: 13px/1.5 system-ui, "Microsoft YaHei", sans-serif; background: #111827; color: #e5e7eb; }
+    .stack { display: flex; flex-direction: column; height: 100vh; }
+    .pane { display: flex; flex-direction: column; min-height: 0; border-bottom: 1px solid #374151; }
+    .pane.main { flex: 1; }
+    .pane.stdin { flex: 0 0 150px; }
+    .pane h3 { margin: 0; padding: 6px 10px; font-size: 12px; font-weight: 600; background: #1f2937; }
+    .CodeMirror {
+      flex: 1;
+      overflow: auto;
+      padding: 8px 10px;
+      background: #0f172a;
+      font: 12px/1.6 ui-monospace, Consolas, monospace;
+      white-space: pre-wrap;
+      user-select: none;
+    }
+    .CodeMirror { position: relative; }
+    .cm-text { white-space: pre-wrap; }
+    .cm-input {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      border: 0;
+      opacity: 0;
+      resize: none;
+    }
+    textarea {
+      box-sizing: border-box;
+      width: 100%;
+      margin: 6px 0 8px;
+      padding: 6px;
+      border: 1px solid #374151;
+      background: #0f172a;
+      color: #e5e7eb;
+      font: 12px ui-monospace, Consolas, monospace;
+      resize: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="stack">
+    <section class="pane stdin">
+      <h3>自定义测试用例</h3>
+      <div class="CodeMirror" id="stdinHost"></div>
+      <textarea id="searchBox" spellcheck="false">q</textarea>
+    </section>
+    <section class="pane main">
+      <h3>代码编辑区（可编辑）</h3>
+      <div class="CodeMirror" id="codeHost"></div>
+    </section>
+  </div>
+
+  <script>
+    // 只暴露 CodeMirror 5 的最小形态：getValue / setValue / focus / execCommand。
+    // 每个实例内部都有一个隐藏的 textarea（真实 CodeMirror 也是这样把光标放进去的），
+    // 这样“当前焦点编辑器”这条链路才能被测试覆盖。
+    const makeEditor = (host, text) => {
+      const textEl = document.createElement('div');
+      textEl.className = 'cm-text';
+      const input = document.createElement('textarea');
+      input.className = 'cm-input';
+      input.spellcheck = false;
+      host.append(textEl, input);
+
+      const editor = {
+        __text: text,
+        __selected: false,
+        __input: input,
+        getValue() { return this.__text; },
+        setValue(value) {
+          this.__text = String(value);
+          this.__selected = false;
+          textEl.textContent = this.__text;
+          input.value = this.__text;
+        },
+        sync() { input.value = this.__text; },
+        focus() { this.sync(); input.focus(); },
+        execCommand(name) {
+          if (name === 'selectAll') {
+            this.sync();
+            input.focus();
+            input.select();
+            this.__selected = true;
+            return true;
+          }
+          return false;
+        },
+        getSelection() { return this.__selected ? this.__text : ''; }
+      };
+
+      input.addEventListener('input', () => {
+        editor.__text = input.value;
+        editor.__selected = false;
+        textEl.textContent = input.value;
+      });
+      input.addEventListener('focus', () => editor.sync());
+
+      host.CodeMirror = editor;
+      editor.setValue(text);
+      return editor;
+    };
+
+    const code = [
+      '# 头歌示例：列表求和',
+      'def solve(items):',
+      '    total = 0',
+      '    for value in items:',
+      '        total += value',
+      '    return total',
+      '',
+      '',
+      'if __name__ == "__main__":',
+      '    print(solve([1, 2, 3, 4, 5]))'
+    ].join('\n');
+
+    window.__stdin = makeEditor(document.getElementById('stdinHost'), 'ghj');
+    window.__main = makeEditor(document.getElementById('codeHost'), code);
+  </script>
+</body>
+</html>

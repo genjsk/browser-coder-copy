@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>影子 DOM 编辑器夹具</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; }
+    textarea { width: 320px; height: 40px; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <h1>编辑器在影子 DOM 里</h1>
+  <p>模拟“页面用 Web Component 包住代码编辑器”的情况：外面的 <code>document.querySelectorAll</code> 看不到里面的编辑器。</p>
+
+  <div id="host"></div>
+  <p>下面这个是页面上真实存在的小输入框，和头歌的“自定义测试用例”一样，故意做得很小：</p>
+  <textarea id="light-box">ghj</textarea>
+
+  <script>
+    const host = document.getElementById('host');
+    const root = host.attachShadow({ mode: 'open' });
+    root.innerHTML = [
+      '<style>div.editor { display: block; min-height: 220px; padding: 8px; border: 1px solid #c8d2e0; border-radius: 6px; font-family: ui-monospace, monospace; white-space: pre-wrap; }</style>',
+      '<div id="shadow-editor" class="editor" contenteditable="true"></div>'
+    ].join('');
+    const editor = root.getElementById('shadow-editor');
+    editor.textContent = 'print("inside shadow root")\nprint(1 + 1)\n';
+    window.__shadowEditor = editor;
+    window.__shadowText = () => editor.innerText;
+  </script>
+</body>
+</html>

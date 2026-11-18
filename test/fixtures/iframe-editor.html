@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>iframe 里的编辑器夹具</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 16px; background: #0f172a; color: #e2e8f0; }
+  h1 { font-size: 15px; }
+  iframe { width: 520px; height: 180px; border: 1px solid #334155; border-radius: 8px; background: #111827; }
+  .note { color: #94a3b8; font-size: 12px; }
+  #outer-box { width: 280px; height: 48px; margin-top: 10px; background: #111827; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px; padding: 6px; }
+</style>
+</head>
+<body>
+<h1>代码区在 iframe 里（主文档只有一个 3 字符小框）</h1>
+<p class="note">验证跨 frame 枚举，以及键盘剪贴板通道能不能作用到子 frame 的焦点元素。</p>
+
+<iframe id="frame" srcdoc="&lt;!DOCTYPE html&gt;&lt;html&gt;&lt;body style='margin:0;background:%23111827'&gt;&lt;textarea id='inner' style='width:100%;height:170px;box-sizing:border-box;background:%23111827;color:%23a5f3fc;border:0;padding:10px;font:13px/1.6 ui-monospace,Consolas,monospace'&gt;def solve(nums):&#10;    return sum(nums)&#10;&lt;/textarea&gt;&lt;/body&gt;&lt;/html&gt;"></iframe>
+
+<textarea id="outer-box" spellcheck="false">ghj</textarea>
+</body>
+</html>

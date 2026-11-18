@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>测试页 · 模拟禁止复制粘贴</title>
+  <style>
+    :root { color-scheme: light; }
+    body {
+      margin: 0;
+      font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      color: #1b2430;
+      background: #f5f7fb;
+      /* 模拟平台限制：整页禁止选择 */
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    header { background: linear-gradient(135deg, #1e40af, #2563eb); color: #fff; padding: 18px 22px; }
+    header h1 { margin: 0; font-size: 17px; }
+    header p { margin: 6px 0 0; font-size: 12.5px; color: #dbeafe; }
+    main { max-width: 860px; margin: 18px auto; padding: 0 18px 40px; }
+    section { background: #fff; border: 1px solid #e3e8f0; border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; }
+    h2 { font-size: 13.5px; margin: 0 0 8px; }
+    p { margin: 6px 0; font-size: 13px; color: #475569; }
+    textarea {
+      width: 100%;
+      min-height: 200px;
+      box-sizing: border-box;
+      border: 1px solid #d7deea;
+      border-radius: 8px;
+      padding: 10px;
+      font: 12.5px/1.6 ui-monospace, Consolas, monospace;
+      background: #fbfdff;
+      user-select: text;
+      -webkit-user-select: text;
+    }
+    #lockedArea {
+      border: 1px dashed #cbd5e1;
+      border-radius: 10px;
+      padding: 12px;
+      background: #fff;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .log { background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 10px; font: 12px/1.5 ui-monospace, Consolas, monospace; max-height: 160px; overflow: auto; }
+    kbd { background: #eef2ff; border: 1px solid #e0e7ff; border-radius: 4px; padding: 0 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>测试页 · 模拟“禁止复制 / 禁止粘贴”</h1>
+    <p>整页 <code>user-select: none</code>，拦截 copy / contextmenu，并让编辑框丢弃合成的 paste 事件。</p>
+  </header>
+
+  <main>
+    <section>
+      <h2>① 受保护的编辑框（要取出的代码就在这里）</h2>
+      <p>这个 textarea 的 paste 事件被 preventDefault，普通的“脚本模拟粘贴”会失败；但浏览器的可信输入（CDP）可以直接写进去。</p>
+      <textarea id="codeArea" spellcheck="false">def solve(nums):
+    seen = set()
+    for value in nums:
+        if value in seen:
+            return value
+        seen.add(value)
+    return -1
+
+
+if __name__ == "__main__":
+    print(solve([1, 3, 4, 3, 2]))
+</textarea>
+    </section>
+
+    <section>
+      <h2>② 禁止选择的文本区</h2>
+      <div id="lockedArea">这段文字默认选不中、右键没有菜单、Ctrl+C 无响应。装好扩展并开启“页面解锁”后刷新本页，再试一次。</div>
+    </section>
+
+    <section>
+      <h2>③ 事件日志</h2>
+      <div id="log" class="log">等待事件…</div>
+    </section>
+  </main>
+
+  <script>
+    // ===== 模拟平台的反复制/反粘贴逻辑 =====
+    const log = (message) => {
+      const box = document.getElementById('log');
+      const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+      box.textContent = `[${time}] ${message}\n${box.textContent}`.slice(0, 4000);
+    };
+
+    ['copy', 'cut', 'paste'].forEach((type) => {
+      window.addEventListener(type, (event) => {
+        event.preventDefault();
+        log(`${type} 被页面拦截（preventDefault）`);
+      }, true);
+    });
+
+    window.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      log('contextmenu 被页面拦截');
+    }, true);
+
+    window.addEventListener('selectstart', (event) => {
+      event.preventDefault();
+      log('selectstart 被页面拦截');
+    }, true);
+
+    window.addEventListener('keydown', (event) => {
+      if ((event.ctrlKey || event.metaKey) && ['c', 'x', 'a'].includes(event.key.toLowerCase())) {
+        event.preventDefault();
+        log(`Ctrl+${event.key.toUpperCase()} 被页面拦截`);
+      }
+    }, true);
+
+    document.getElementById('codeArea').addEventListener('paste', (event) => {
+      event.preventDefault();
+      log('编辑框丢弃了 paste 事件（只接受真实键盘输入）');
+    });
+
+    document.addEventListener('DOMContentLoaded', () => log('测试页已就绪'));
+  </script>
+</body>
+</html>

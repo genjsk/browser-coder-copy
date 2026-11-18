@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>画布代码区（页面自己实现复制粘贴）</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 16px; background: #0f172a; color: #e2e8f0; }
+  h1 { font-size: 15px; }
+  p { color: #94a3b8; font-size: 12px; }
+  #board { border: 1px solid #334155; border-radius: 8px; display: block; }
+  #sink { width: 320px; height: 40px; margin-top: 10px; background: #111827; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px; padding: 6px; }
+</style>
+</head>
+<body>
+<h1>代码只画在 canvas 上，DOM 里没有文本</h1>
+<p>页面在捕获阶段自己处理 Ctrl+C / Ctrl+V（模拟头歌那类“禁止复制粘贴”的实现）。扩展的“页面自身复制 / 页面自身粘贴”通道要能穿过它。</p>
+
+<canvas id="board" width="720" height="220"></canvas>
+<textarea id="sink" spellcheck="false" placeholder="页面内部的隐藏编辑框（保持为空）"></textarea>
+
+<script>
+  const code = 'class Demo {\n  public static void main(String[] args) {\n    System.out.println("canvas");\n  }\n}\n';
+  const board = document.getElementById('board');
+  const ctx = board.getContext('2d');
+  ctx.fillStyle = '#0b1220';
+  ctx.fillRect(0, 0, 720, 220);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.font = '13px ui-monospace, Consolas, monospace';
+  code.split('\n').forEach((line, index) => ctx.fillText(line, 14, 28 + index * 22));
+
+  window.__copied = 0;
+  window.__pasted = '';
+
+  document.addEventListener('keydown', (event) => {
+    if (!(event.ctrlKey || event.metaKey)) return;
+    const key = String(event.key || '').toLowerCase();
+    if (key === 'c') {
+      event.preventDefault();
+      navigator.clipboard.writeText(code).then(() => { window.__copied += 1; }).catch(() => {});
+    }
+    if (key === 'v') {
+      event.preventDefault();
+      navigator.clipboard.readText().then((text) => { window.__pasted = text; }).catch(() => {});
+    }
+  }, true);
+</script>
+</body>
+</html>

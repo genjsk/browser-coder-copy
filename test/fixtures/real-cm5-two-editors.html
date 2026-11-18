@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>真实 CodeMirror 5 双编辑器夹具</title>
+  <link rel="stylesheet" href="../vendor/codemirror5/codemirror.min.css">
+  <style>
+    body { margin: 0; padding: 12px; font: 13px/1.5 system-ui, "Microsoft YaHei", sans-serif; background: #111827; color: #e5e7eb; user-select: none; }
+    h3 { margin: 10px 0 6px; font-size: 12px; font-weight: 600; color: #93c5fd; }
+    #stdinEditor { height: 120px; border: 1px solid #374151; }
+    #codeEditor { height: 400px; border: 1px solid #374151; }
+    .CodeMirror { height: 100%; font: 12px/1.6 ui-monospace, Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <h3>自定义测试用例（小框，真实 CodeMirror 5）</h3>
+  <div id="stdinEditor"></div>
+
+  <h3>代码编辑区（大框，真实 CodeMirror 5）</h3>
+  <div id="codeEditor"></div>
+
+  <script src="../vendor/codemirror5/codemirror.min.js"></script>
+  <script>
+    const stdin = CodeMirror(document.getElementById('stdinEditor'), {
+      value: 'ghj',
+      lineNumbers: true,
+      mode: 'text/plain'
+    });
+
+    const code = CodeMirror(document.getElementById('codeEditor'), {
+      value: [
+        '# 头歌示例：列表求和',
+        'def solve(items):',
+        '    total = 0',
+        '    for value in items:',
+        '        total += value',
+        '    return total',
+        '',
+        '',
+        'if __name__ == "__main__":',
+        '    print(solve([1, 2, 3, 4, 5]))'
+      ].join('\n'),
+      lineNumbers: true,
+      mode: 'python'
+    });
+
+    // 和头歌一样整页禁止选中，并且拦截复制/右键
+    for (const type of ['copy', 'cut', 'contextmenu', 'selectstart']) {
+      window.addEventListener(type, (event) => event.preventDefault(), true);
+    }
+
+    window.__stdin = stdin;
+    window.__main = code;
+    window.__snapshot = () => ({ stdin: stdin.getValue(), main: code.getValue() });
+  </script>
+</body>
+</html>

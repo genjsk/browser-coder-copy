@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>测试夹具 · 模拟 CodeMirror 5</title>
+  <style>
+    body { font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; margin: 0; background: #f5f7fb; }
+    header { background: #1e40af; color: #fff; padding: 14px 20px; }
+    header h1 { margin: 0; font-size: 16px; }
+    main { max-width: 820px; margin: 16px auto; padding: 0 16px; }
+    .CodeMirror {
+      background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 12px 14px;
+      font: 12.5px/1.6 ui-monospace, Consolas, monospace; white-space: pre; overflow: auto; min-height: 180px;
+      user-select: none; -webkit-user-select: none;
+    }
+    p { color: #475569; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header><h1>夹具 · CodeMirror 5 形态（只暴露 .CodeMirror 实例）</h1></header>
+  <main>
+    <p>页面把内容放在 <code>element.CodeMirror</code> 里，DOM 文本只是渲染结果的副本——和头歌、LeetCode 等平台的在线 IDE 一样。</p>
+    <div class="CodeMirror" id="cm"></div>
+  </main>
+  <script>
+    const state = { value: 'const answer = 42;\nconsole.log("头歌", answer);\n' };
+    const host = document.getElementById('cm');
+
+    function render() {
+      host.textContent = state.value;
+    }
+
+    host.CodeMirror = {
+      getValue: () => state.value,
+      setValue: (next) => {
+        state.value = String(next);
+        render();
+      },
+      focus: () => {},
+      execCommand: (command) => {
+        window.__cmCommand = command;
+        return true;
+      }
+    };
+
+    // 供自动化测试校验写入结果
+    window.__cmDoc = state;
+    render();
+  </script>
+</body>
+</html>

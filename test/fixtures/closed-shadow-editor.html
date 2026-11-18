@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>封闭影子 DOM 编辑器夹具</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 16px; background: #111827; color: #e5e7eb; }
+  h1 { font-size: 15px; }
+  #shadow-editor {
+    display: block; min-height: 120px; padding: 10px; border-radius: 8px;
+    background: #1f2937; color: #a5f3fc; font: 13px/1.5 ui-monospace, Consolas, monospace;
+    white-space: pre-wrap; outline: none;
+  }
+  #light-box {
+    width: 320px; height: 60px; margin-top: 12px; background: #1f2937; color: #e5e7eb;
+    border: 1px solid #374151; border-radius: 8px; padding: 8px;
+  }
+  .note { color: #9ca3af; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>代码区在 closed shadow root 里（HTML 里看不见，只能靠 attachShadow 钩子枚举）</h1>
+<p class="note">页面故意在 light DOM 留一个 3 字符的测试用例小框，自动选择必须挑到影子 DOM 里的代码区。</p>
+
+<div id="host"></div>
+<textarea id="light-box" spellcheck="false">ghj</textarea>
+
+<script>
+  (() => {
+    const host = document.getElementById('host');
+    const root = host.attachShadow({ mode: 'closed' });
+    const editor = document.createElement('div');
+    editor.id = 'shadow-editor';
+    editor.contentEditable = 'true';
+    editor.textContent = 'print("closed shadow")\nprint(2 + 3)\n';
+    root.append(editor);
+
+    window.__closedText = () => editor.textContent;
+    window.__closedFocus = () => { editor.focus(); return true; };
+  })();
+</script>
+</body>
+</html>

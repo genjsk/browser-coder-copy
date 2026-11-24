@@ -1,16 +1,6 @@
-// 头歌代码复制助手 · 后台服务（MV3 service worker）
-//
-// 原理与 browser-control-open-source 相同：
-//   1. chrome.scripting.executeScript({ world: 'MAIN' }) 在页面主环境读取编辑器内容；
-//   2. chrome.debugger + CDP Input.insertText / Input.dispatchKeyEvent 产生浏览器级
-//      “可信输入”，不触发页面自身的 paste 拦截；
-//   3. Runtime.evaluate 在页面主环境执行脚本。
-// 与父项目不同：不经过本地 MCP 服务，扩展直接操作用户当前标签页，点按钮即用。
+// 网页代码复制助手 · 后台服务（MV3 service worker）
 
-import { planTyping, keyEventParams } from './typing.js';
-
-const DEFAULTS = { debugConsent: false, unlock: true, typingDelayMs: 3 };
-const MAX_TEXT = 300000;
+const DEFAULTS = { debugConsent: false, unlock: true };
 const attachedTabs = new Set();
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -28,7 +18,7 @@ async function getSettings() {
 
 async function assertPage(tabId) {
   const id = Number(tabId);
-  if (!Number.isInteger(id) || id <= 0) throw fail('NO_TAB', '没有可用的标签页，请打开头歌页面后重试。');
+  if (!Number.isInteger(id) || id <= 0) throw fail('NO_TAB', '没有可用的标签页，请打开网页后重试。');
   let tab;
   try {
     tab = await chrome.tabs.get(id);
@@ -87,15 +77,36 @@ chrome.tabs.onRemoved.addListener((tabId) => attachedTabs.delete(tabId));
 // 搜索框……只按类型优先级取第一个必然选错。所以这里统一用 editorApi：
 //
 //   editorApi('list')                        → 本 frame 全部候选（类型、字符数、面积、预览）
-//   editorApi('read' | 'focus' | 'selectAll' | 'set', spec, text)
+//   editorApi('read', spec)
 //
 // spec = { type: 'codemirror5', nth: 0 }，nth 是同类型元素在 DOM 里的序号
-// （写入前后稳定，不会因为内容变化而漂移）。spec 为空时退回“第一个可见编辑器”。
+// spec 为空时按可见性、字符数和面积选择编辑器。
 // ---------------------------------------------------------------------------
 
-function editorApi(op, spec, value) {
-  const TYPES = ['codemirror5', 'monaco', 'ace', 'codemirror6', 'textarea', 'contenteditable'];
-  const clean = (text) => String(text == null ? '' : text).replace(/\u200b/g, '');
+function editorApi(op, spec) {
+  const TYPES = ['codemirror5', 'monaco', 'ace', 'codemirror6', 'codeblock', 'textarea', 'contenteditable'];
+  // 头歌可能在子框架中渲染代码，仍需沿用原有的字面 NBSP 修复。
+  const fromEduCoder = /^([\w-]+\.)*educoder\.net$/i.test(location.hostname)
+    || Array.from(location.ancestorOrigins || []).some((origin) => /^https?:\/\/([\w-]+\.)*educoder\.net(?::\d+)?$/i.test(origin));
+  const clean = (text) => {
+    const normalized = String(text ?? '')
+      .replace(/[\u00a0\u2000-\u200a\u202f\u205f\u3000]/g, ' ')
+      .replace(/\u200b/g, '');
+    return fromEduCoder ? normalized.replace(/NBSP/g, ' ') : normalized;
+  };
+  if (op === 'selection') {
+    const node = document.activeElement;
+    let text = '';
+    if (typeof window.__educoderReadSelectedCode === 'function') {
+      text = window.__educoderReadSelectedCode();
+    } else if (node?.tagName === 'TEXTAREA' && node.selectionEnd > node.selectionStart) {
+      text = node.value.slice(node.selectionStart, node.selectionEnd);
+    } else {
+      text = window.getSelection()?.toString() || '';
+    }
+    return { text: clean(text), focused: document.hasFocus() };
+  }
+
   const visible = (element) => !!(element && element.getClientRects && element.getClientRects().length);
   const insideEditor = (element) => !!(element.closest && element.closest('.monaco-editor,.CodeMirror,.ace_editor,.cm-editor'));
   const measure = (element) => {
@@ -109,44 +120,42 @@ function editorApi(op, spec, value) {
 
   // 打开影子 DOM：页面用 Web Component 包住编辑器时，document.querySelectorAll 看不见里面的节点，
   // 只会找到页面上剩下的那个小输入框——这正是“所有候选都写进测试用例”的根源之一。
-  const deepQuery = (selector, filter) => {
-    const found = [];
+  const roots = [];
+  const collectRoots = () => {
     const seen = new Set();
     const walk = (root, depth) => {
-      if (!root || depth > 20) return;
-      let nodes = [];
-      try { nodes = root.querySelectorAll(selector); } catch { nodes = []; }
-      for (const node of nodes) found.push(node);
-      let all = [];
-      try { all = root.querySelectorAll('*'); } catch { all = []; }
-      for (const element of all) {
-        const shadow = element.shadowRoot;
-        if (!shadow || seen.has(shadow)) continue;
-        seen.add(shadow);
-        walk(shadow, depth + 1);
+      if (!root || depth > 20 || seen.has(root)) return;
+      seen.add(root);
+      roots.push(root);
+      for (const element of root.querySelectorAll('*')) {
+        walk(element.shadowRoot, depth + 1);
       }
     };
     walk(document, 0);
     // closed shadow root 用 element.shadowRoot 拿不到，只能靠 unlock.js 在
     // 页面创建组件时截下来的引用（window.__educoderShadowRoots）。
     try {
-      const roots = typeof window.__educoderShadowRoots === 'function' ? window.__educoderShadowRoots() : [];
-      for (const root of roots || []) {
-        if (!root || seen.has(root)) continue;
-        seen.add(root);
+      const trackedRoots = typeof window.__educoderShadowRoots === 'function' ? window.__educoderShadowRoots() : [];
+      for (const root of trackedRoots || []) {
         walk(root, 1);
       }
     } catch {
       /* 忽略 */
     }
-    return filter ? found.filter(filter) : found;
   };
+  collectRoots();
+  const deepQuery = (selector) => roots.flatMap((root) => Array.from(root.querySelectorAll(selector)));
 
-  // 同类型元素的 DOM 顺序 —— list 与 read/focus/selectAll/set 共用这一套编号。
+  // 枚举和读取共用同一套编号。
   const list = (type) => {
     if (type === 'codemirror5') return deepQuery('.CodeMirror');
     if (type === 'ace') return deepQuery('.ace_editor');
     if (type === 'codemirror6') return deepQuery('.cm-content');
+    if (type === 'codeblock') {
+      return deepQuery('pre').filter((element) => visible(element)
+        && getComputedStyle(element).visibility === 'visible'
+        && !insideEditor(element) && !element.isContentEditable);
+    }
     if (type === 'textarea') {
       return deepQuery('textarea').filter((element) => {
         if (insideEditor(element)) return false;
@@ -155,14 +164,18 @@ function editorApi(op, spec, value) {
         return measure(element) >= 400; // 1px 的内部输入框没有可读内容，直接扔掉
       });
     }
-    if (type === 'contenteditable') return deepQuery('[contenteditable="true"],[contenteditable=""]').filter((element) => !insideEditor(element));
+    if (type === 'contenteditable') {
+      return deepQuery('[contenteditable="true" i],[contenteditable=""],[contenteditable="plaintext-only" i]')
+        .filter((element) => !insideEditor(element) && !element.parentElement?.isContentEditable);
+    }
     if (type === 'monaco') {
       const api = window.monaco && window.monaco.editor;
-      const editors = api && api.getEditors ? api.getEditors() : [];
-      if (editors.length) return editors;
+      const available = typeof api?.getEditors === 'function' ? api.getEditors() : null;
+      const editors = Array.isArray(available) ? available : [];
       // Monaco 被 webpack 打进 bundle 时 window.monaco 不存在，但页面里仍有
       // .monaco-editor 的 DOM。这里退化成 DOM 候选：至少能读到渲染出来的行。
-      return deepQuery('.monaco-editor');
+      const knownNodes = new Set(editors.map((editor) => editor.getDomNode?.()));
+      return [...editors, ...deepQuery('.monaco-editor').filter((node) => !knownNodes.has(node))];
     }
     return [];
   };
@@ -197,7 +210,7 @@ function editorApi(op, spec, value) {
         if (!view || !view.state || !view.state.doc) return null;
         return { editor: view, element: item, model: null };
       }
-      if (type === 'textarea' || type === 'contenteditable') {
+      if (type === 'textarea' || type === 'contenteditable' || type === 'codeblock') {
         return { editor: item, element: item, model: null };
       }
     } catch {}
@@ -221,6 +234,12 @@ function editorApi(op, spec, value) {
       if (type === 'codemirror6') return clean(hit.editor.state.doc.toString());
       if (type === 'textarea') return clean(hit.element.value);
       if (type === 'contenteditable') return clean(hit.element.innerText);
+      if (type === 'codeblock') {
+        const code = hit.element.querySelector(':scope > code:only-of-type') || hit.element;
+        const hasOtherText = Array.from(hit.element.childNodes).some((node) =>
+          node !== code && node.textContent?.trim() && node.getAttribute?.('aria-hidden') !== 'true');
+        return clean((hasOtherText ? hit.element : code).innerText);
+      }
       return clean(hit.editor.getValue());
     } catch {
       return '';
@@ -243,8 +262,16 @@ function editorApi(op, spec, value) {
     };
   };
 
-  // 可见 → 字符数 → 面积；头歌的代码区大、测试用例框小，分数自然拉开。
-  const score = (info) => (info.visible ? 1e6 : 0) + Math.min(info.chars, 20000) * 20 + Math.min(info.area, 400000) / 40;
+  // 有内容的专业编辑器优先于代码块和通用输入区。
+  const priority = (type) => {
+    if (fromEduCoder) return type === 'codeblock' ? -1 : 0;
+    if (type === 'codeblock') return 1;
+    return type === 'textarea' || type === 'contenteditable' ? 0 : 2;
+  };
+  const compare = (a, b) => Number(b.visible) - Number(a.visible)
+    || Number(b.chars > 0) - Number(a.chars > 0)
+    || priority(b.type) - priority(a.type)
+    || b.chars - a.chars || b.area - a.area;
 
   const collect = () => {
     const all = [];
@@ -259,7 +286,7 @@ function editorApi(op, spec, value) {
 
   const autoPick = () => {
     const all = collect();
-    all.sort((a, b) => (b.visible - a.visible) || (score(b) - score(a)));
+    all.sort(compare);
     return all[0] || null;
   };
 
@@ -292,8 +319,7 @@ function editorApi(op, spec, value) {
     return origins;
   };
   const holdsFocus = (element) => focusOrigins().some((origin) => within(origin, element));
-  const activeCandidate = () => {
-    const all = collect();
+  const activeCandidate = (all = collect()) => {
     // 最近交互的元素优先（弹窗抢焦点后，它才是用户真正的目标）。
     const remembered = rememberedElement();
     if (remembered) {
@@ -328,13 +354,14 @@ function editorApi(op, spec, value) {
     chars: info.chars,
     area: info.area,
     visible: info.visible,
+    priority: priority(info.type),
     preview: info.preview
   });
 
   if (op === 'list') {
     const infos = collect();
-    infos.sort((a, b) => (b.visible - a.visible) || (score(b) - score(a)));
-    const active = activeCandidate();
+    const active = activeCandidate(infos);
+    infos.sort(compare);
     let selection = '';
     try { selection = String(window.getSelection ? window.getSelection() : ''); } catch {}
     return {
@@ -344,7 +371,6 @@ function editorApi(op, spec, value) {
       editorCount: infos.length,
       candidates: infos.map((info) => ({
         ...publicInfo(info),
-        score: score(info),
         active: !!(active && active.type === info.type && active.nth === info.nth)
       })),
       active: active ? { type: active.type, nth: active.nth } : null,
@@ -360,80 +386,28 @@ function editorApi(op, spec, value) {
   const target = resolved.info;
   const type = target.type;
   const nth = target.nth;
-  const hit = target.hit;
-  try {
-    if (op === 'read') {
-      const partial = type === 'monaco' && hit.domOnly;
-      return { ok: true, type, nth, text: target.text, partial };
-    }
-
-    if (op === 'focus') {
-      if (type === 'monaco' && hit.domOnly) {
-        const input = hit.element.querySelector('textarea');
-        if (input && input.focus) input.focus();
-      } else if (type === 'textarea' || type === 'contenteditable') hit.element.focus();
-      else if (hit.editor && typeof hit.editor.focus === 'function') hit.editor.focus();
-      else if (hit.element.focus) hit.element.focus();
-      if (type === 'monaco' && !hit.domOnly && hit.editor && typeof hit.editor.revealLine === 'function') {
-        hit.editor.revealLine(1);
-      }
-      return { ok: true, type, nth };
-    }
-
-    if (op === 'selectAll') {
-      if (type === 'monaco' && hit.domOnly) {
-        return { ok: false, type, nth, error: 'dom-only monaco' };
-      }
-      if (type === 'codemirror5') {
-        hit.editor.focus();
-        hit.editor.execCommand('selectAll');
-      } else if (type === 'monaco') {
-        hit.editor.focus();
-        hit.editor.setSelection(hit.model.getFullModelRange());
-      } else if (type === 'ace') {
-        hit.editor.focus();
-        hit.editor.selectAll();
-      } else if (type === 'codemirror6') {
-        if (typeof hit.editor.focus === 'function') hit.editor.focus();
-        hit.editor.dispatch({ selection: { anchor: 0, head: hit.editor.state.doc.length } });
-      } else if (type === 'textarea') {
-        hit.element.focus();
-        hit.element.select();
+  if (op === 'focus-copy' || op === 'check-copy-focus') {
+    const { editor, element } = target.hit;
+    if (op === 'focus-copy') {
+      if (typeof editor?.focus === 'function') {
+        editor.focus();
       } else {
-        hit.element.focus();
-        document.execCommand('selectAll');
+        const input = element.querySelector('textarea, [contenteditable="true"], [contenteditable="plaintext-only"], [role="textbox"][tabindex]');
+        input?.focus();
       }
-      return { ok: true, type, nth };
     }
-
-    if (op === 'set') {
-      const text = String(value == null ? '' : value);
-      if (type === 'monaco' && hit.domOnly) {
-        return { ok: false, type, nth, error: 'dom-only monaco' };
-      }
-      if (type === 'codemirror5') {
-        hit.editor.setValue(text);
-      } else if (type === 'monaco') {
-        hit.model.setValue(text);
-      } else if (type === 'ace') {
-        hit.editor.setValue(text, -1);
-      } else if (type === 'codemirror6') {
-        hit.editor.dispatch({ changes: { from: 0, to: hit.editor.state.doc.length, insert: text } });
-      } else if (type === 'textarea') {
-        const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(hit.element), 'value')?.set;
-        if (setter) setter.call(hit.element, text);
-        else hit.element.value = text;
-        hit.element.dispatchEvent(new Event('input', { bubbles: true }));
-      } else {
-        hit.element.innerText = text;
-        hit.element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-      }
-      return { ok: true, type, nth };
-    }
-  } catch (error) {
-    return { ok: false, type, nth, error: String(error && error.message ? error.message : error) };
+    const active = element.getRootNode().activeElement;
+    const focused = within(active, element) && (active !== element || element.isContentEditable);
+    if (focused || op === 'check-copy-focus') return { ok: true, focused };
+    const line = element.querySelector('.view-lines .view-line') || element;
+    const rect = line.getBoundingClientRect();
+    const x = rect.left + Math.min(rect.width / 2, 60);
+    const y = rect.top + Math.min(rect.height / 2, 16);
+    const hit = document.elementFromPoint(x, y);
+    return { ok: true, focused: false, point: hit && (within(hit, element) || within(element, hit)) ? { x, y } : null };
   }
-  return { ok: false, error: `未知操作：${op}` };
+  const partial = type === 'monaco' && target.hit.domOnly;
+  return { ok: true, type, nth, text: target.text, partial };
 }
 
 // ---------------------------------------------------------------------------
@@ -441,7 +415,7 @@ function editorApi(op, spec, value) {
 // ---------------------------------------------------------------------------
 
 // 每个 frame 都问一遍“你有什么编辑器”，再合并排序：
-// 可见 → 字符数 → 面积。头歌页面里代码编辑器大、测试用例框小，分数自然拉开；
+// 按可见性、是否有内容、来源类型、字符数和面积排序；
 // 同分时才看 DOM 顺序。弹窗拿到完整候选列表后可以让用户手动指定。
 async function probeAllFrames(tabId) {
   let results;
@@ -450,14 +424,14 @@ async function probeAllFrames(tabId) {
       target: { tabId, allFrames: true },
       world: 'MAIN',
       func: editorApi,
-      args: ['list', null, null]
+      args: ['list']
     });
   } catch {
     results = await chrome.scripting.executeScript({
       target: { tabId },
       world: 'MAIN',
       func: editorApi,
-      args: ['list', null, null]
+      args: ['list']
     });
   }
   const frames = results
@@ -472,7 +446,7 @@ async function probeAllFrames(tabId) {
       candidates: (item.result && item.result.candidates) ? item.result.candidates.length : 0,
       error: item.result && item.result.ok
         ? ''
-        : ((item.result && item.result.error) || '无法在这个 frame 里执行脚本')
+        : ((item.result && item.result.error) || '无法读取这个页面框架里的编辑器')
     }))
     .sort((a, b) => a.frameId - b.frameId);
   const merged = mergeFrames(frames);
@@ -489,7 +463,9 @@ function mergeFrames(frames) {
     }
   }
   if (!candidates.length) return null;
-  candidates.sort((a, b) => (Number(b.visible) - Number(a.visible)) || (b.chars - a.chars) || (b.area - a.area));
+  candidates.sort((a, b) => Number(b.visible) - Number(a.visible)
+    || Number(b.chars > 0) - Number(a.chars > 0)
+    || b.priority - a.priority || b.chars - a.chars || b.area - a.area);
   return {
     candidates,
     frames,
@@ -595,7 +571,7 @@ async function readFocusedEditor(tabId) {
       active: true
     };
   }
-  throw fail('NO_ACTIVE_EDITOR', '没找到光标所在的编辑器：先在页面里点一下代码区，再点读取或写入。');
+  throw fail('NO_ACTIVE_EDITOR', '没找到光标所在的编辑器：先在页面里点一下代码区，再点读取。');
 }
 
 // 读取：没给 spec 就自动挑分数最高的那个，给了就精确读那一个（找不到就报错，绝不偷偷换目标）。
@@ -631,285 +607,32 @@ async function readEditor(tabId, wanted) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// 写入
-// ---------------------------------------------------------------------------
+async function readPageSelection(tabId) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    world: 'MAIN',
+    func: editorApi,
+    args: ['selection']
+  });
+  const selections = results.filter(({ result }) => result?.text);
+  const selected = selections.find(({ result }) => result.focused) || selections[0];
+  if (!selected) throw fail('NO_SELECTION', '请在网页里选中文字。有些编辑器的选区需要在网页上用 Ctrl+C 复制。');
+  return selected.result.text;
+}
 
-async function runInEditor(tabId, frameId, op, spec, value) {
+async function runInEditor(tabId, frameId, op, spec) {
   if (frameId == null) return null;
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId, frameIds: [frameId] },
       world: 'MAIN',
       func: editorApi,
-      args: [op, spec || null, value == null ? null : String(value)]
+      args: [op, spec || null]
     });
     const hit = results.find((item) => item.result && item.result.ok);
     return hit ? hit.result : null;
   } catch {
     return null;
-  }
-}
-
-async function focusEditorFrame(tabId, frameId, spec) {
-  return !!(await runInEditor(tabId, frameId, 'focus', spec));
-}
-
-async function selectAllViaPage(tabId, frameId, spec) {
-  return runInEditor(tabId, frameId, 'selectAll', spec);
-}
-
-async function setEditorValueViaPage(tabId, frameId, text, spec) {
-  return runInEditor(tabId, frameId, 'set', spec, text);
-}
-
-async function selectAllInPage(tabId) {
-  await send(tabId, 'Input.dispatchKeyEvent', {
-    type: 'rawKeyDown',
-    key: 'a',
-    code: 'KeyA',
-    windowsVirtualKeyCode: 65,
-    nativeVirtualKeyCode: 65,
-    modifiers: 2,
-    commands: ['selectAll']
-  });
-  await send(tabId, 'Input.dispatchKeyEvent', {
-    type: 'keyUp',
-    key: 'a',
-    code: 'KeyA',
-    windowsVirtualKeyCode: 65,
-    nativeVirtualKeyCode: 65,
-    modifiers: 2
-  });
-}
-
-// Enter 必须发成真实按键：画布 / Monaco 这类编辑器按 keydown 处理换行，
-// 塞一个 '\n' 文本进隐藏 textarea 往往不会进文档。
-async function pressEnter(tabId) {
-  const params = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
-  await send(tabId, 'Input.dispatchKeyEvent', { type: 'rawKeyDown', ...params });
-  // textarea 的换行来自 char 事件；编辑器（Monaco / 画布）认 keydown，char 对它们无害。
-  await send(tabId, 'Input.dispatchKeyEvent', { type: 'char', ...params, text: '\r', unmodifiedText: '\r' });
-  await send(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', ...params });
-}
-
-async function typeByKeyEvents(tabId, text, delayMs, options = {}) {
-  const plan = planTyping(text, { multiline: true });
-  for (const segment of plan.segments) {
-    if (segment.kind === 'text') {
-      if (options.enterForNewline && segment.text.includes('\n')) {
-        const pieces = segment.text.split('\n');
-        for (let index = 0; index < pieces.length; index++) {
-          if (index > 0) {
-            await pressEnter(tabId);
-            if (delayMs > 0) await sleep(delayMs);
-          }
-          if (pieces[index]) await send(tabId, 'Input.insertText', { text: pieces[index] });
-        }
-      } else {
-        await send(tabId, 'Input.insertText', { text: segment.text });
-      }
-    } else {
-      for (const type of ['rawKeyDown', 'char', 'keyUp']) {
-        await send(tabId, 'Input.dispatchKeyEvent', keyEventParams(segment, type));
-      }
-    }
-    if (delayMs > 0) await sleep(delayMs);
-  }
-}
-
-function normalize(value) {
-  return String(value == null ? '' : value).replace(/\r\n?/g, '\n');
-}
-
-// DOM-only Monaco 只能从 .view-line 拼文本：行尾空白和最后的空行会丢。比较时按行
-// 去掉尾部空白、丢掉结尾空行，避免“写对了却报没验证过”。
-function trimLines(value) {
-  return normalize(value)
-    .split('\n')
-    .map((line) => line.replace(/[ \t\u200b]+$/, ''))
-    .join('\n')
-    .replace(/\n+$/, '');
-}
-
-function textMatches(actual, expected, type) {
-  if (actual == null) return null;
-  if (type === 'monaco') return trimLines(actual) === trimLines(expected);
-  return normalize(actual) === normalize(expected);
-}
-
-async function pasteIntoEditor(tabId, args) {
-  const settings = await getSettings();
-  if (!settings.debugConsent) throw fail('DEBUG_CONSENT_REQUIRED', '请先在弹窗中点击“同意并启用调试权限”。');
-  const text = typeof args.text === 'string' ? args.text : '';
-  if (!text) throw fail('TEXT_REQUIRED', '没有可粘贴的文本，剪贴板是空的。');
-  if (text.length > MAX_TEXT) throw fail('TEXT_TOO_LARGE', `文本太大（${text.length} 字符），请分次粘贴。`);
-
-  const tab = await chrome.tabs.get(tabId);
-  if (!tab.active) {
-    await chrome.tabs.update(tabId, { active: true });
-    await sleep(150);
-  }
-  if (tab.status === 'loading') await sleep(400);
-
-  // 读写必须落在同一个编辑器上：先按用户的 spec（或自动最高分）定目标，
-  // 再把 type/nth 固定下来传给全选、输入、校验和兜底。
-  const wanted = normalizeSpec(args.spec);
-  let before = null;
-  try {
-    before = await readEditor(tabId, wanted);
-  } catch (error) {
-    // 用户明确选了目标时，找不到就报错，绝不悄悄写到别的小输入框里。
-    if (wanted) throw error;
-    before = null;
-  }
-  const targetSpec = before ? { type: before.type, nth: before.nth } : wanted;
-  const targetFrame = before && before.frameId != null ? before.frameId : (wanted ? wanted.frameId : null);
-  if (before && before.frameId != null) await focusEditorFrame(tabId, before.frameId, targetSpec);
-  await sleep(40);
-
-  const mode = args.mode === 'keys' ? 'keys' : 'insert';
-  const replace = args.replace !== false;
-  await attach(tabId);
-  try {
-    if (replace) {
-      const selected = await selectAllViaPage(tabId, targetFrame, targetSpec);
-      if (!selected || !selected.ok) await selectAllInPage(tabId);
-    }
-    if (mode === 'keys') await typeByKeyEvents(tabId, text, settings.typingDelayMs);
-    else await send(tabId, 'Input.insertText', { text });
-  } catch (error) {
-    await detach(tabId);
-    if (error && error.code) throw error;
-    throw fail('INPUT_FAILED', `可信输入失败：${error?.message || error}`);
-  }
-  await detach(tabId);
-
-  const stuck = before ? { type: before.type, nth: before.nth, frameId: before.frameId } : wanted;
-  let after = await readEditor(tabId, stuck).catch(() => null);
-  let verified = after ? textMatches(after.text, text, (after && after.type) || (before && before.type)) : null;
-  let method = mode === 'keys' ? 'keys' : 'insertText';
-  let usedFallback = false;
-
-  // Monaco 这类编辑器把文档藏在组件里（页面上只有渲染出来的行），Input.insertText 落在
-  // 隐藏 textarea 上通常不会进模型。真键盘事件是唯一可靠的路子：先点正文区域拿到焦点，
-  // Ctrl+A 全选，再逐字敲进去。
-  if (verified === false && before && (method === 'insertText' || method === 'keys')) {
-    const typed = await typeByKeyboard(tabId, text, settings.typingDelayMs).catch(() => null);
-    after = await readEditor(tabId, stuck).catch(() => null);
-    const typedOk = after ? textMatches(after.text, text, (after && after.type) || (before && before.type)) : null;
-    if (typed && typed.ok !== false && typedOk !== false) {
-      usedFallback = true;
-      method = 'keys-fallback';
-      verified = typedOk;
-    } else {
-      after = await readEditor(tabId, stuck).catch(() => null);
-      verified = after ? textMatches(after.text, text, (after && after.type) || (before && before.type)) : null;
-    }
-  }
-
-  if (verified === false && before) {
-    const forced = await setEditorValueViaPage(tabId, before.frameId, text, targetSpec).catch(() => null);
-    if (forced && forced.ok) {
-      usedFallback = true;
-      method = 'setValue';
-      after = await readEditor(tabId, stuck).catch(() => null);
-      verified = after ? textMatches(after.text, text, (after && after.type) || (before && before.type)) : null;
-    }
-  }
-
-  let warning = '';
-  if (!before) warning = '未识别到编辑器，已向当前焦点插入；请确认结果。';
-  else if (verified === false) warning = '写入后内容与剪贴板不一致，请手动全选检查。';
-
-  return {
-    method,
-    usedFallback,
-    verified,
-    chars: [...text].length,
-    editorType: after?.type || before?.type || null,
-    editorNth: after?.nth ?? before?.nth ?? null,
-    frameId: before?.frameId ?? after?.frameId ?? null,
-    beforeLength: before?.text?.length ?? null,
-    afterLength: after?.text?.length ?? null,
-    candidates: after?.candidates || before?.candidates || [],
-    warning
-  };
-}
-
-// 走真键盘：点编辑器正文确认焦点，Ctrl+A 全选，然后逐字键入。
-// 这是 Monaco / 画布编辑器上唯一不依赖“编辑器对象”的写入方式。
-async function typeByKeyboard(tabId, text, delayMs) {
-  await attach(tabId);
-  try {
-    assertFocused(await focusEditorTarget(tabId));
-    await send(tabId, 'Input.dispatchKeyEvent', {
-      type: 'rawKeyDown',
-      key: 'a',
-      code: 'KeyA',
-      windowsVirtualKeyCode: 65,
-      nativeVirtualKeyCode: 65,
-      modifiers: 2
-    });
-    await send(tabId, 'Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      key: 'a',
-      code: 'KeyA',
-      windowsVirtualKeyCode: 65,
-      nativeVirtualKeyCode: 65,
-      modifiers: 2
-    });
-    await sleep(30);
-    await typeByKeyEvents(tabId, text, delayMs, { enterForNewline: true });
-    return { ok: true };
-  } catch (error) {
-    return { ok: false, error: String((error && error.message) || error) };
-  } finally {
-    await detach(tabId);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 脚本执行
-// ---------------------------------------------------------------------------
-
-async function evaluateInPage(tabId, expression) {
-  const settings = await getSettings();
-  if (!settings.debugConsent) throw fail('DEBUG_CONSENT_REQUIRED', '请先在弹窗中同意启用调试权限。');
-  if (typeof expression !== 'string' || !expression.trim()) throw fail('EXPRESSION_REQUIRED', '请输入要执行的脚本。');
-  await attach(tabId);
-  try {
-    const evaluation = await send(tabId, 'Runtime.evaluate', {
-      expression,
-      returnByValue: true,
-      awaitPromise: true,
-      userGesture: true,
-      timeout: 8000
-    });
-    if (evaluation.exceptionDetails) {
-      const detail = evaluation.exceptionDetails.exception?.description
-        || evaluation.exceptionDetails.text
-        || '脚本执行失败';
-      throw fail('EVAL_EXCEPTION', String(detail).split('\n')[0].slice(0, 300));
-    }
-    let value = evaluation.result?.value;
-    if (value === undefined && evaluation.result?.unserializableValue) value = evaluation.result.unserializableValue;
-    if (value === undefined && evaluation.result?.description) value = evaluation.result.description;
-    let serialized = '';
-    try {
-      serialized = JSON.stringify(value);
-    } catch {
-      serialized = String(value);
-    }
-    if (serialized === undefined) serialized = String(value);
-    const truncated = serialized.length > 120000;
-    return {
-      value: truncated ? serialized.slice(0, 120000) : value,
-      serialized: truncated ? serialized.slice(0, 120000) : serialized,
-      truncated
-    };
-  } finally {
-    await detach(tabId);
   }
 }
 
@@ -992,7 +715,6 @@ async function diagnose(tabId, spec) {
 // 有的站点的代码区画在 canvas 上、藏在 closed shadow root 里、或者放在注入不进去的
 // iframe 里：既枚举不到编辑器元素，也找不到编辑器实例。但浏览器自己的快捷键不受影响：
 //   Ctrl+A → Ctrl+C：把当前编辑器里选中的内容送进系统剪贴板，弹窗用 clipboardRead 读出来；
-//   Ctrl+V：把系统剪贴板的内容交给当前聚焦的元素，页面自己拦 paste 也拦不住浏览器这一层。
 // 按键走 CDP 的 Input.dispatchKeyEvent，带真实 Control 修饰键，页面看到的仍是可信事件。
 // ---------------------------------------------------------------------------
 
@@ -1062,8 +784,8 @@ async function focusTab(tabId) {
   if (tab.status === 'loading') await sleep(400);
 }
 
-// 打开/关闭“快捷键护盾”：页面在 window 捕获阶段 preventDefault 掉 Ctrl+A/C/V 时，
-// 由解锁脚本抢先截住事件，让浏览器的默认全选/复制/粘贴照常执行。
+// 打开/关闭“快捷键护盾”：页面在 window 捕获阶段 preventDefault 掉 Ctrl+A/C 时，
+// 由解锁脚本处理事件，保留浏览器默认的全选和复制。
 async function setShortcutShield(tabId, milliseconds) {
   try {
     await chrome.scripting.executeScript({
@@ -1304,7 +1026,17 @@ async function copyByKeyboard(tabId, options = {}) {
   await attach(tabId);
   try {
     if (shield) await setShortcutShield(tabId, 5000);
-    assertFocused(await focusEditorTarget(tabId));
+    const source = normalizeSpec(options.source);
+    if (source && source.frameId != null) {
+      let focus = await runInEditor(tabId, source.frameId, 'focus-copy', source);
+      if (!focus?.focused && focus?.point && source.frameId === 0) {
+        await clickAt(tabId, focus.point);
+        focus = await runInEditor(tabId, source.frameId, 'check-copy-focus', source);
+      }
+      assertFocused({ hasEditor: true, focused: !!focus?.focused });
+    } else {
+      assertFocused(await focusEditorTarget(tabId));
+    }
     await pressShortcut(tabId, 'a', 'KeyA', 65);
     await sleep(150);
     await pressShortcut(tabId, 'c', 'KeyC', 67);
@@ -1312,53 +1044,6 @@ async function copyByKeyboard(tabId, options = {}) {
     return { method: shield ? 'keys-copy-native' : 'keys-copy-page', chars: null };
   } finally {
     if (shield) await setShortcutShield(tabId, 0);
-    await detach(tabId);
-  }
-}
-
-async function pasteByKeyboard(tabId, options = {}) {
-  const replace = options.replace !== false;
-  const shield = options.shield !== false;
-  await assertConsent();
-  await assertPage(tabId);
-  await focusTab(tabId);
-  await attach(tabId);
-  try {
-    if (shield) await setShortcutShield(tabId, 5000);
-    assertFocused(await focusEditorTarget(tabId));
-    if (replace) {
-      await pressShortcut(tabId, 'a', 'KeyA', 65);
-      await sleep(150);
-    }
-    await pressShortcut(tabId, 'v', 'KeyV', 86);
-    await sleep(300);
-    return { method: shield ? 'keys-paste-native' : 'keys-paste-page' };
-  } finally {
-    if (shield) await setShortcutShield(tabId, 0);
-    await detach(tabId);
-  }
-}
-
-// 纯键入：不碰剪贴板，像真人一样一个一个键敲进去。
-// 平台如果只拦“粘贴”（检测 insertFromPaste / paste 事件），这条路照样能进。
-async function typeIntoPage(tabId, text, options = {}) {
-  const replace = options.replace !== false;
-  await assertConsent();
-  await assertPage(tabId);
-  await focusTab(tabId);
-  await attach(tabId);
-  try {
-    await setShortcutShield(tabId, 30000);
-    assertFocused(await focusEditorTarget(tabId));
-    if (replace) {
-      await pressShortcut(tabId, 'a', 'KeyA', 65);
-      await sleep(150);
-    }
-    await typeByKeyEvents(tabId, text, 3, { enterForNewline: true });
-    await sleep(200);
-    return { method: 'keys-typed', chars: text.length };
-  } finally {
-    await setShortcutShield(tabId, 0);
     await detach(tabId);
   }
 }
@@ -1388,7 +1073,6 @@ async function handle(message) {
       const patch = {};
       if (typeof message.debugConsent === 'boolean') patch.debugConsent = message.debugConsent;
       if (typeof message.unlock === 'boolean') patch.unlock = message.unlock;
-      if (typeof message.typingDelayMs === 'number') patch.typingDelayMs = Math.max(0, Math.min(50, message.typingDelayMs));
       if (Object.keys(patch).length) await chrome.storage.local.set(patch);
       return { settings: await getSettings() };
     }
@@ -1396,32 +1080,17 @@ async function handle(message) {
       const tab = await assertPage(message.tabId);
       return { editor: await readEditor(tab.id, message.spec) };
     }
-    case 'paste': {
+    case 'read-selection': {
       const tab = await assertPage(message.tabId);
-      return { result: await pasteIntoEditor(tab.id, message) };
-    }
-    case 'eval': {
-      const tab = await assertPage(message.tabId);
-      return { result: await evaluateInPage(tab.id, message.expression) };
+      return { text: await readPageSelection(tab.id) };
     }
     case 'diagnose': {
       const tab = await assertPage(message.tabId);
       return { diagnosis: await diagnose(tab.id, message.spec) };
     }
-    case 'keytype': {
-      const tab = await assertPage(message.tabId);
-      const text = String(message.text || '');
-      if (!text) throw fail('TEXT_REQUIRED', '没有要键入的文本。');
-      if (text.length > MAX_TEXT) throw fail('TEXT_TOO_LARGE', '文本太长，请分段。');
-      return { result: await typeIntoPage(tab.id, text, { replace: message.replace !== false }) };
-    }
     case 'keycopy': {
       const tab = await assertPage(message.tabId);
-      return { result: await copyByKeyboard(tab.id, { shield: message.shield !== false }) };
-    }
-    case 'keypaste': {
-      const tab = await assertPage(message.tabId);
-      return { result: await pasteByKeyboard(tab.id, { replace: message.replace !== false, shield: message.shield !== false }) };
+      return { result: await copyByKeyboard(tab.id, { shield: message.shield !== false, source: message.source }) };
     }
     default:
       throw fail('UNKNOWN_ACTION', `未知操作：${message.type}`);

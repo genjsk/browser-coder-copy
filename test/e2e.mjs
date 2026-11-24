@@ -3,9 +3,8 @@
 //   1) manifest 合法、service worker 起得来；
 //   2) content/unlock.js 在 document_start 解除 user-select 与事件拦截；
 //   3) 后台能识别并读取页面编辑器；
-//   4) 可信输入（CDP insertText / 逐字键入）能真正改掉编辑器内容并自校验；
-//   5) CodeMirror 5 形态的编辑器（头歌同款）能读能写；
-//   6) 解锁后 copy 事件不再被页面取消。
+//   4) 能从 CodeMirror、Monaco、子框架和影子 DOM 读取代码；
+//   5) 页面复制和键盘复制通道可用。
 //
 // 用法：node test/e2e.mjs
 //   CHROME_PATH  指定 Chrome 可执行文件（默认 Windows 安装路径）
@@ -177,7 +176,7 @@ try {
     return {
       styleTag: !!document.getElementById('__educoder_copy_unlock_style__'),
       userSelect: getComputedStyle(area).userSelect || getComputedStyle(area).webkitUserSelect,
-      inlineHandlers: ['oncopy', 'onpaste', 'oncontextmenu', 'onselectstart'].filter((name) => area.hasAttribute(name)),
+      inlineHandlers: ['oncopy', 'oncontextmenu', 'onselectstart'].filter((name) => area.hasAttribute(name)),
       flag: !!window.__educoderCopyUnlock__
     };
   })()`);
@@ -198,7 +197,7 @@ try {
   const popupEval = (expression) => evaluateOn(popupSession, expression);
 
   const popupState = await popupEval(`({ title: document.title, hasConsentBanner: !!document.getElementById('consentBanner') })`);
-  check('popup 页面正常渲染', popupState.title.includes('头歌'), popupState.title);
+  check('popup 页面正常渲染', popupState.title === '网页代码复制助手', popupState.title);
   // 无头模式下页面默认不算“聚焦”，剪贴板 API 会拒绝；让 CDP 帮它装作被聚焦。
   await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }, popupSession);
 
@@ -214,60 +213,15 @@ try {
     read.ok ? `${read.editor?.type} / ${(read.editor?.text || '').length} 字符` : read.error);
   check('读取内容包含页面代码', (read.editor?.text || '').includes('def solve'));
 
-  // ---- 4. 可信输入：insertText 写入并自校验
-  const written = 'print("hello 头歌")\nprint(solve([1, 2, 3]))\n';
-  const paste = await popupEval(`(async () => {
-    await chrome.storage.local.set({ debugConsent: true });
-    const tabs = await chrome.tabs.query({});
-    const target = tabs.find((tab) => (tab.url || '').includes('test/test-page.html'));
-    return await chrome.runtime.sendMessage({ type: 'paste', tabId: target.id, text: ${JSON.stringify(written)}, replace: true, mode: 'insert' });
-  })()`);
-  check('可信粘贴返回成功', paste.ok === true, paste.ok ? `method=${paste.result?.method}` : `${paste.code}: ${paste.error}`);
-  check('写入后自校验通过', paste.ok === true && paste.result?.verified === true, `verified=${paste.result?.verified}`);
-
-  await sleep(200);
-  const domText = await evaluate(`document.getElementById('codeArea').value`);
-  check('页面 DOM 内容确实被替换', domText === written, JSON.stringify(domText).slice(0, 80));
-
-  // ---- 5. 脚本执行
-  const evaluated = await callOn('test/test-page.html', {
-    type: 'eval',
-    expression: 'document.getElementById("codeArea").value.split(String.fromCharCode(10)).length'
-  });
-  check('页面脚本执行返回结果', evaluated.ok === true && String(evaluated.result?.serialized) === '3',
-    JSON.stringify(evaluated.result?.serialized));
-
-  // ---- 6. 逐字键入（真实按键事件，含中文与换行）
-  const keysText = 'k1 = "中"\nk2 = 2;\n';
-  const keysPaste = await popupEval(`(async () => {
-    const tabs = await chrome.tabs.query({});
-    const target = tabs.find((tab) => (tab.url || '').includes('test/test-page.html'));
-    return await chrome.runtime.sendMessage({ type: 'paste', tabId: target.id, text: ${JSON.stringify(keysText)}, replace: true, mode: 'keys' });
-  })()`);
-  check('逐字键入模式成功', keysPaste.ok === true && keysPaste.result?.method === 'keys' && keysPaste.result?.verified === true,
-    keysPaste.ok ? `method=${keysPaste.result?.method} verified=${keysPaste.result?.verified}` : `${keysPaste.code}: ${keysPaste.error}`);
-  const domKeys = await evaluate(`document.getElementById('codeArea').value`);
-  check('逐字键入内容与原文一致', domKeys === keysText, JSON.stringify(domKeys).slice(0, 80));
-
-  // ---- 7. CodeMirror 5 夹具（内容只存在于编辑器实例里）
-  const cmSession = await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/cm5-editor.html`);
+  // ---- 4. CodeMirror 5 夹具（内容只存在于编辑器实例里）
+  await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/cm5-editor.html`);
   await sleep(1000);
 
   const cmRead = await callOn('cm5-editor.html', { type: 'read' });
   check('识别 CodeMirror 5 并读取内容', cmRead.ok === true && cmRead.editor?.type === 'codemirror5' && (cmRead.editor?.text || '').includes('const answer = 42'),
     cmRead.ok ? `${cmRead.editor?.type} / ${(cmRead.editor?.text || '').slice(0, 24)}…` : cmRead.error);
 
-  const cmText = 'let fromHelper = true;\n';
-  const cmPaste = await popupEval(`(async () => {
-    const tabs = await chrome.tabs.query({});
-    const target = tabs.find((tab) => (tab.url || '').includes('cm5-editor.html'));
-    return await chrome.runtime.sendMessage({ type: 'paste', tabId: target.id, text: ${JSON.stringify(cmText)}, replace: true, mode: 'insert' });
-  })()`);
-  const cmDoc = await evaluateOn(cmSession, `window.__cmDoc.value`);
-  check('CodeMirror 5 夹具写入成功', cmPaste.ok === true && cmPaste.result?.verified === true && cmDoc === cmText,
-    cmPaste.ok ? `method=${cmPaste.result?.method} doc=${JSON.stringify(cmDoc)}` : `${cmPaste.code}: ${cmPaste.error}`);
-
-  // ---- 8. 解锁后 copy 事件不再被页面取消
+  // ---- 5. 解锁后 copy 事件不再被页面取消
   const copyProbe = await evaluate(`(() => {
     const range = document.createRange();
     range.selectNodeContents(document.getElementById('lockedArea'));
@@ -280,7 +234,7 @@ try {
   })()`);
   check('解除复制拦截后 copy 不再被取消', copyProbe.selected > 0 && copyProbe.blocked === false,
     `选中 ${copyProbe.selected} 字，defaultPrevented=${copyProbe.blocked}`);
-  // ---- 9. 多编辑器页面：代码区 + 自定义测试用例，不能“读 A 写 B”
+  // ---- 6. 多编辑器页面：代码区和自定义测试用例
   const multiSession = await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/cm5-two-editors.html`);
   await sleep(900);
 
@@ -294,39 +248,7 @@ try {
     specRead.ok === true && specRead.editor?.text === 'ghj',
     specRead.ok ? JSON.stringify(specRead.editor?.text) : specRead.error);
 
-  const pasteToMulti = (spec, text) => {
-    const message = { type: 'paste', text, replace: true, mode: 'insert' };
-    if (spec) message.spec = spec;
-    return popupEval(`(async () => {
-      await chrome.storage.local.set({ debugConsent: true });
-      const tabs = await chrome.tabs.query({});
-      const target = tabs.find((tab) => (tab.url || '').includes('cm5-two-editors.html'));
-      if (!target) return { ok: false, error: '找不到双编辑器标签页' };
-      return await chrome.runtime.sendMessage(Object.assign(${JSON.stringify(message)}, { tabId: target.id }));
-    })()`);
-  };
-
-  const codeText = 'print("written into the code editor")';
-  const autoPaste = await pasteToMulti(null, codeText);
-  await sleep(250);
-  const afterAuto = await evaluateOn(multiSession, `({ main: window.__main.getValue(), stdin: window.__stdin.getValue() })`);
-  check('多编辑器：自动写入落在代码区，测试用例框未被动',
-    autoPaste.ok === true && autoPaste.result?.verified === true && afterAuto.main === codeText && afterAuto.stdin === 'ghj',
-    autoPaste.ok
-      ? `method=${autoPaste.result?.method} verified=${autoPaste.result?.verified} stdin=${JSON.stringify(afterAuto.stdin)}`
-      : `${autoPaste.code}: ${autoPaste.error}`);
-
-  const stdinText = 'stdin-only';
-  const specPaste = await pasteToMulti({ type: 'codemirror5', nth: 0 }, stdinText);
-  await sleep(250);
-  const afterSpec = await evaluateOn(multiSession, `({ main: window.__main.getValue(), stdin: window.__stdin.getValue() })`);
-  check('多编辑器：按选择器写入只改测试用例框',
-    specPaste.ok === true && specPaste.result?.verified === true && afterSpec.stdin === stdinText && afterSpec.main === codeText,
-    specPaste.ok
-      ? `nth=${specPaste.result?.editorNth} stdin=${JSON.stringify(afterSpec.stdin)}`
-      : `${specPaste.code}: ${specPaste.error}`);
-
-  // ---- 10. “当前焦点”定位 + 严格 spec：不会再出现“选了 A 却写进 B”
+  // ---- 7. 定位当前焦点和指定编辑器
   await evaluateOn(multiSession, `(() => { window.__main.focus(); return true; })()`);
   await sleep(80);
   const activeRead = await callOn('cm5-two-editors.html', { type: 'read', spec: { type: 'active', nth: 0 } });
@@ -334,56 +256,23 @@ try {
     activeRead.ok === true && activeRead.editor?.type === 'codemirror5' && activeRead.editor?.nth === 1,
     activeRead.ok ? `type=${activeRead.editor?.type} nth=${activeRead.editor?.nth}` : `${activeRead.code}: ${activeRead.error}`);
 
-  const focusedMain = 'focused write target';
-  const activePaste = await pasteToMulti({ type: 'active', nth: 0 }, focusedMain);
-  await sleep(250);
-  const afterFocused = await evaluateOn(multiSession, `({ main: window.__main.getValue(), stdin: window.__stdin.getValue() })`);
-  check('当前焦点模式：写入落在焦点所在编辑器，测试用例框不动',
-    activePaste.ok === true && activePaste.result?.verified === true && afterFocused.main === focusedMain && afterFocused.stdin === stdinText,
-    activePaste.ok ? `method=${activePaste.result?.method} nth=${activePaste.result?.editorNth} stdin=${JSON.stringify(afterFocused.stdin)}` : `${activePaste.code}: ${activePaste.error}`);
-
   await evaluateOn(multiSession, `(() => { window.__stdin.focus(); return true; })()`);
   await sleep(80);
-  const focusedStdin = 'focused stdin';
-  const stdinPaste = await pasteToMulti({ type: 'active', nth: 0 }, focusedStdin);
-  await sleep(250);
-  const afterFocusedStdin = await evaluateOn(multiSession, `({ main: window.__main.getValue(), stdin: window.__stdin.getValue() })`);
-  check('当前焦点模式：焦点换到测试用例框时只改它',
-    stdinPaste.ok === true && afterFocusedStdin.stdin === focusedStdin && afterFocusedStdin.main === focusedMain,
-    stdinPaste.ok ? `stdin=${JSON.stringify(afterFocusedStdin.stdin)}` : `${stdinPaste.code}: ${stdinPaste.error}`);
+  const activeStdin = await callOn('cm5-two-editors.html', { type: 'read', spec: { type: 'active' } });
+  check('当前焦点切到测试用例框后读取该框', activeStdin.ok && activeStdin.editor?.nth === 0 && activeStdin.editor?.text === 'ghj');
 
-  const missingPaste = await pasteToMulti({ type: 'codemirror5', nth: 7 }, 'must not land anywhere');
-  await sleep(200);
-  const afterMissing = await evaluateOn(multiSession, `({ main: window.__main.getValue(), stdin: window.__stdin.getValue() })`);
-  check('明确指定不存在的编辑器时报错而不是乱写',
-    missingPaste.ok === false && missingPaste.code === 'EDITOR_NOT_FOUND' && afterMissing.main === focusedMain && afterMissing.stdin === focusedStdin,
-    missingPaste.ok ? `竟然写入成功 nth=${missingPaste.result?.editorNth}` : `${missingPaste.code}`);
+  const missing = await callOn('cm5-two-editors.html', { type: 'read', spec: { type: 'codemirror5', nth: 7 } });
+  check('指定的编辑器不存在时报错', !missing.ok && missing.code === 'EDITOR_NOT_FOUND');
 
-  // ---- 11. 编辑器在影子 DOM 里时也要被发现
-  const shadowSession = await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/shadow-editor.html`);
+  // ---- 8. 编辑器在影子 DOM 里时也要被发现
+  await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/shadow-editor.html`);
   await sleep(900);
   const shadowRead = await callOn('shadow-editor.html', { type: 'read' });
   check('影子 DOM 里的编辑器能被发现，不会只认页面上的小输入框',
     shadowRead.ok === true && shadowRead.editor?.type === 'contenteditable' && (shadowRead.editor?.text || '').includes('inside shadow root'),
     shadowRead.ok ? `${shadowRead.editor?.type} nth=${shadowRead.editor?.nth} / ${(shadowRead.editor?.text || '').slice(0, 24)}` : shadowRead.error);
 
-  const shadowText = 'print("written into shadow")';
-  const shadowPaste = await popupEval(`(async () => {
-    await chrome.storage.local.set({ debugConsent: true });
-    const tabs = await chrome.tabs.query({});
-    const target = tabs.find((tab) => (tab.url || '').includes('shadow-editor.html'));
-    if (!target) return { ok: false, error: '找不到影子 DOM 标签页' };
-    return await chrome.runtime.sendMessage({ type: 'paste', tabId: target.id, text: ${JSON.stringify(shadowText)}, replace: true, mode: 'insert' });
-  })()`);
-  await sleep(250);
-  const shadowAfter = await evaluateOn(shadowSession, `window.__shadowText()`);
-  check('影子 DOM 编辑器写入并校验',
-    shadowPaste.ok === true && shadowPaste.result?.verified === true && String(shadowAfter || '').trim() === shadowText,
-    shadowPaste.ok ? `method=${shadowPaste.result?.method} text=${JSON.stringify(shadowAfter).slice(0, 60)}` : `${shadowPaste.code}: ${shadowPaste.error}`);
-
-  void shadowSession;
-
-  // ---- 12. 真实 CodeMirror 5（cdnjs 5.65.16）双实例：贴近头歌的真实形态
+  // ---- 9. 真实 CodeMirror 5（cdnjs 5.65.16）双实例
   const realSession = await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/real-cm5-two-editors.html`);
   await sleep(1600);
 
@@ -398,47 +287,6 @@ try {
   check('真实 CM5：当前焦点模式定位到代码区',
     realActive.ok === true && realActive.editor?.type === 'codemirror5' && realActive.editor?.nth === 1 && realActive.editor?.active === true,
     realActive.ok ? `nth=${realActive.editor?.nth} active=${realActive.editor?.active}` : `${realActive.code}: ${realActive.error}`);
-
-  const realText = 'print("real codemirror 5")';
-  const realPaste = await popupEval(`(async () => {
-    await chrome.storage.local.set({ debugConsent: true });
-    const tabs = await chrome.tabs.query({});
-    const target = tabs.find((tab) => (tab.url || '').includes('real-cm5-two-editors.html'));
-    if (!target) return { ok: false, error: '找不到真实 CM5 标签页' };
-    return await chrome.runtime.sendMessage({
-      type: 'paste',
-      tabId: target.id,
-      text: ${JSON.stringify(realText)},
-      replace: true,
-      mode: 'insert',
-      spec: { type: 'active', nth: 0 }
-    });
-  })()`);
-  await sleep(300);
-  const realAfter = await evaluateOn(realSession, `window.__snapshot()`);
-  check('真实 CM5：可信输入写进代码区并自校验',
-    realPaste.ok === true && realPaste.result?.verified === true && realAfter.main === realText && realAfter.stdin === 'ghj',
-    realPaste.ok ? `method=${realPaste.result?.method} verified=${realPaste.result?.verified} stdin=${JSON.stringify(realAfter.stdin)}` : `${realPaste.code}: ${realPaste.error}`);
-
-  const realMissing = await popupEval(`(async () => {
-    await chrome.storage.local.set({ debugConsent: true });
-    const tabs = await chrome.tabs.query({});
-    const target = tabs.find((tab) => (tab.url || '').includes('real-cm5-two-editors.html'));
-    if (!target) return { ok: false, error: '找不到真实 CM5 标签页' };
-    return await chrome.runtime.sendMessage({
-      type: 'paste',
-      tabId: target.id,
-      text: 'must not land',
-      replace: true,
-      mode: 'insert',
-      spec: { type: 'codemirror5', nth: 9 }
-    });
-  })()`);
-  await sleep(250);
-  const realAfterMissing = await evaluateOn(realSession, `window.__snapshot()`);
-  check('真实 CM5：序号不存在时报错，两个编辑器都不动',
-    realMissing.ok === false && realMissing.code === 'EDITOR_NOT_FOUND' && realAfterMissing.main === realText && realAfterMissing.stdin === 'ghj',
-    realMissing.ok ? `竟然写入 nth=${realMissing.result?.editorNth}` : `${realMissing.code}`);
 
   // 弹窗抢走焦点：activeElement 变回 body，但“最近交互元素”还记得代码区。
   await evaluateOn(realSession, `(() => { window.__main.focus(); document.activeElement.blur(); return document.activeElement.tagName; })()`);
@@ -478,29 +326,18 @@ try {
 
   void realSession;
 
-  // ---- 13. 封闭影子 DOM + 键盘剪贴板兜底
-  const closedSession = await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/closed-shadow-editor.html`);
+  // ---- 10. 封闭影子 DOM 和键盘复制
+  await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/closed-shadow-editor.html`);
   await sleep(1200);
   const closedRead = await callOn('closed-shadow-editor.html', { type: 'read' });
   check('closed shadow root 里的代码区也能枚举并读取',
     closedRead.ok === true && closedRead.editor?.type === 'contenteditable' && (closedRead.editor?.text || '').includes('closed shadow'),
     closedRead.ok ? `${closedRead.editor?.type} / ${closedRead.editor?.chars} 字符` : `${closedRead.code}: ${closedRead.error}`);
 
-  const closedPaste = await callOn('closed-shadow-editor.html', {
-    type: 'paste',
-    text: 'print("closed shadow")\nprint(1)\n',
-    replace: true,
-    mode: 'insert'
-  });
-  await sleep(250);
-  const closedAfter = await evaluateOn(closedSession, `window.__closedText()`);
-  check('closed shadow root 编辑器可写入并自校验',
-    closedPaste.ok === true && closedPaste.result?.verified === true && closedAfter.includes('print(1)'),
-    closedPaste.ok ? `method=${closedPaste.result?.method} verified=${closedPaste.result?.verified}` : `${closedPaste.code}: ${closedPaste.error}`);
-
   // 键盘通道：DOM 完全读不到时，靠 Ctrl+A / Ctrl+C 与系统剪贴板互通。
   // 先用可信鼠标点一下代码区（模拟用户操作，记下坐标），再主动 blur 掉焦点，
   // 验证后台能按坐标点回去、而不是依赖页面当前焦点。
+  await popupEval(`chrome.storage.local.set({ debugConsent: true })`);
   const boxRect = await evaluateOn(pageSession, `(() => {
     const rect = document.getElementById('codeArea').getBoundingClientRect();
     return { x: Math.round(rect.left + 30), y: Math.round(rect.top + 24) };
@@ -528,28 +365,7 @@ try {
       ? (clipboardAfterCopy.ok ? `剪贴板 ${JSON.stringify(flat(clipboardAfterCopy.text).slice(0, 40))} / 页面 ${JSON.stringify(flat(pageText).slice(0, 40))}` : `读剪贴板失败：${clipboardAfterCopy.error}（focused=${clipboardAfterCopy.focused}）`)
       : `${keyCopy.code}: ${keyCopy.error}`);
 
-  const keyboardText = 'print("keyboard channel")\n';
-  await cdp.send('Page.bringToFront', {}, popupSession);
-  await sleep(200);
-  const clipWrite = await popupEval(`(async () => {
-    try {
-      await navigator.clipboard.writeText(${JSON.stringify(keyboardText)});
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error: String(error) };
-    }
-  })()`);
-  await sleep(150);
-  const keyPaste = await callOn('test/test-page.html', { type: 'keypaste', replace: true });
-  await sleep(500);
-  const pastedValue = await evaluateOn(pageSession, `document.getElementById('codeArea').value`);
-  check('键盘通道：Ctrl+V 能把剪贴板内容写进页面',
-    clipWrite.ok && keyPaste.ok === true && pastedValue === keyboardText,
-    !clipWrite.ok
-      ? `写剪贴板失败：${clipWrite.error}`
-      : (keyPaste.ok ? `页面内容 ${JSON.stringify(pastedValue.slice(0, 24))}` : `${keyPaste.code}: ${keyPaste.error}`));
-
-  // ---- 14. iframe 里的编辑器：枚举 + 键盘剪贴板通道
+  // ---- 11. iframe 里的编辑器：枚举和键盘复制
   const frameSession = await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/iframe-editor.html`);
   await sleep(1500);
   const frameRead = await callOn('iframe-editor.html', { type: 'read' });
@@ -586,19 +402,7 @@ try {
       ? (frameClipboard.ok ? `剪贴板 ${JSON.stringify(flat(frameClipboard.text).slice(0, 24))}` : `读剪贴板失败：${frameClipboard.error}`)
       : `${frameCopy.code}: ${frameCopy.error}`);
 
-  const frameText = 'print("iframe paste")\n';
-  await cdp.send('Page.bringToFront', {}, popupSession);
-  await sleep(200);
-  await popupEval(`(async () => { try { await navigator.clipboard.writeText(${JSON.stringify(frameText)}); return true; } catch { return false; } })()`);
-  await sleep(200);
-  const framePaste = await callOn('iframe-editor.html', { type: 'keypaste', replace: true });
-  await sleep(600);
-  const frameAfter = await evaluateOn(frameSession, `document.getElementById('frame').contentWindow.document.getElementById('inner').value`);
-  check('键盘通道：Ctrl+V 能写进子 frame 的编辑器',
-    framePaste.ok === true && flat(frameAfter) === flat(frameText),
-    framePaste.ok ? `子 frame 内容 ${JSON.stringify(flat(frameAfter).slice(0, 24))}` : `${framePaste.code}: ${framePaste.error}`);
-
-  // ---- 15. 画布代码区：页面自己实现复制/粘贴 + 纯键入兜底
+  // ---- 12. 画布代码区：页面自己实现复制
   const canvasSession = await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/canvas-copy.html`);
   await sleep(1200);
   const canvasRead = await callOn('canvas-copy.html', { type: 'read' });
@@ -613,7 +417,6 @@ try {
   await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: canvasRect.x, y: canvasRect.y, button: 'left', buttons: 1, clickCount: 1 }, canvasSession);
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: canvasRect.x, y: canvasRect.y, button: 'left', buttons: 0, clickCount: 1 }, canvasSession);
   await sleep(200);
-  const canvasCode = await evaluateOn(canvasSession, `document.querySelector('canvas') ? 'class Demo' : ''`);
   const copyViaPage = await callOn('canvas-copy.html', { type: 'keycopy', shield: false });
   await cdp.send('Page.bringToFront', {}, popupSession);
   await sleep(500);
@@ -630,53 +433,16 @@ try {
       ? (canvasClipboard.ok ? `剪贴板 ${JSON.stringify(flat(canvasClipboard.text).slice(0, 28))}` : `读剪贴板失败：${canvasClipboard.error}`)
       : `${copyViaPage.code}: ${copyViaPage.error}`);
 
-  const canvasText = 'print("canvas paste")\n';
-  await popupEval(`(async () => { try { await navigator.clipboard.writeText(${JSON.stringify(canvasText)}); return true; } catch { return false; } })()`);
-  await sleep(200);
-  const pasteViaPage = await callOn('canvas-copy.html', { type: 'keypaste', shield: false, replace: true });
-  await sleep(600);
-  const pagePasted = await evaluateOn(canvasSession, `window.__pasted`);
-  check('键盘通道：让页面自己的 Ctrl+V 跑，画布页也能收到粘贴内容',
-    pasteViaPage.ok === true && flat(pagePasted) === flat(canvasText),
-    pasteViaPage.ok ? `页面收到 ${JSON.stringify(flat(pagePasted).slice(0, 28))}` : `${pasteViaPage.code}: ${pasteViaPage.error}`);
-
-  const typed = 'def typed():\n    return 42\n';
-  // 先把焦点点到 #sink 上：纯键入只打进有焦点的地方
-  const sinkRect = await evaluateOn(canvasSession, `(() => {
-    const rect = document.getElementById('sink').getBoundingClientRect();
-    return { x: Math.round(rect.left + 30), y: Math.round(rect.top + 12) };
-  })()`);
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: sinkRect.x, y: sinkRect.y, button: 'left', buttons: 1, clickCount: 1 }, canvasSession);
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: sinkRect.x, y: sinkRect.y, button: 'left', buttons: 0, clickCount: 1 }, canvasSession);
-  await sleep(200);
-  const typeWrite = await callOn('canvas-copy.html', { type: 'keytype', text: typed, replace: true });
-  await sleep(500);
-  const typedValue = await evaluateOn(canvasSession, `document.getElementById('sink').value`);
-  check('纯键入：逐字敲进页面里的文本框',
-    typeWrite.ok === true && flat(typedValue) === flat(typed),
-    typeWrite.ok ? `文本框内容 ${JSON.stringify(flat(typedValue).slice(0, 28))}` : `${typeWrite.code}: ${typeWrite.error}`);
-
-  const typedMulti = 'line1\nline2\nline3\n';
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: sinkRect.x, y: sinkRect.y, button: 'left', buttons: 1, clickCount: 1 }, canvasSession);
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: sinkRect.x, y: sinkRect.y, button: 'left', buttons: 0, clickCount: 1 }, canvasSession);
-  await sleep(150);
-  const typeMulti = await callOn('canvas-copy.html', { type: 'keytype', text: typedMulti, replace: true });
-  await sleep(600);
-  const typedMultiValue = await evaluateOn(canvasSession, `document.getElementById('sink').value`);
-  check('纯键入：多行代码的换行是真实 Enter 键',
-    typeMulti.ok === true && flat(typedMultiValue) === flat(typedMulti),
-    typeMulti.ok ? `文本框 ${JSON.stringify(flat(typedMultiValue).slice(0, 28))}` : `${typeMulti.code}: ${typeMulti.error}`);
-
   const canvasDiag = await callOn('canvas-copy.html', { type: 'diagnose' });
   check('诊断包含页面结构快照（画布 / DOM 编辑器计数）',
     canvasDiag.ok === true && Array.isArray(canvasDiag.diagnosis?.snapshot) && canvasDiag.diagnosis.snapshot.some((frame) => frame.canvases === 1 && frame.editors && frame.editors.monacoDom === 0),
     canvasDiag.ok ? `frame ${canvasDiag.diagnosis.snapshot?.map((f) => f.canvases).join(',')} 个画布` : `${canvasDiag.code}: ${canvasDiag.error}`);
 
-  // ---- 16. Monaco 形态：DOM 里只有渲染出来的行，键盘通道必须先点正文区域
+  // ---- 13. Monaco 形态：DOM 里只有渲染出来的行
   const monacoSession = await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/monaco-dom.html`);
   await sleep(1200);
   await cdp.send('Page.bringToFront', {}, monacoSession);
-  const monacoCode = 'class Monaco {\n  public static void main(String[] a) {\n    System.out.println("monaco");\n  }\n}\n';
+  const monacoCode = await evaluateOn(monacoSession, 'window.__monacoCode()');
 
   const monacoDiag = await callOn('monaco-dom.html', { type: 'diagnose' });
   const monacoCandidates = (monacoDiag.diagnosis && monacoDiag.diagnosis.candidates) || [];
@@ -693,18 +459,18 @@ try {
     monacoRead.ok === true && monacoRead.editor?.partial === true,
     `partial=${monacoRead.editor?.partial}`);
 
-  // 弹窗里的真实路径：点“读取编辑器”时，DOM-only 的 Monaco 自动改用键盘通道拿全文。
+  // 预览只有可见行时，点击复制应该走编辑器自有的 copy 事件，保留视口外的结尾。
   const monacoPopup = await openPage(`chrome-extension://${extensionId}/popup.html`, 'monaco-popup');
   await sleep(900);
   const monacoPopupEval = (expression) => evaluateOn(monacoPopup, expression);
   await cdp.send('Page.bringToFront', {}, monacoPopup);
   await sleep(300);
-  await monacoPopupEval(`(() => { document.getElementById('readBtn').click(); return true; })()`);
+  await monacoPopupEval(`(() => { document.getElementById('copyBtn').click(); return true; })()`);
   await sleep(2600);
   const monacoPopupText = await monacoPopupEval(`document.getElementById('codeView').value`);
   const monacoPopupMeta = await monacoPopupEval(`document.getElementById('readMeta').textContent`);
-  check('Monaco 形态：弹窗点“读取编辑器”自动拿全文（DOM 里只有可见行）',
-    flat(monacoPopupText).trim() === flat(monacoCode).trim(),
+  check('Monaco 形态：从可见行预览点复制，也能拿到视口外的最后几行',
+    flat(monacoPopupText) === flat(monacoCode),
     `读到 ${monacoPopupText.length} 字符 · ${monacoPopupMeta.slice(0, 44)}`);
 
   const monacoCopy = await callOn('monaco-dom.html', { type: 'keycopy', shield: false });
@@ -724,49 +490,7 @@ try {
     monacoClip.ok === true && flat(monacoClip.text).trim() === flat(monacoCode).trim(),
     monacoClip.ok ? `${flat(monacoClip.text).split('\n').length} 行 · ${JSON.stringify(flat(monacoClip.text).slice(0, 32))}` : `读剪贴板失败：${monacoClip.error}`);
 
-  const monacoPasteText = 'print("monaco paste")\n';
-  await popupEval(`(async () => { try { await navigator.clipboard.writeText(${JSON.stringify(monacoPasteText)}); return true; } catch { return false; } })()`);
-  await sleep(200);
-  const monacoPaste = await callOn('monaco-dom.html', { type: 'keypaste', shield: false, replace: true });
-  await sleep(500);
-  const monacoPasted = await evaluateOn(monacoSession, `window.__monacoPasted`);
-  check('Monaco 形态：键盘粘贴能进编辑器',
-    monacoPaste.ok === true && flat(monacoPasted) === flat(monacoPasteText),
-    monacoPaste.ok ? `页面收到 ${JSON.stringify(flat(monacoPasted).slice(0, 32))}` : `${monacoPaste.code}: ${monacoPaste.error}`);
-
-  const monacoTypedText = 'print("typed fallback")\n';
-  const monacoWrite = await callOn('monaco-dom.html', { type: 'paste', text: monacoTypedText, replace: true, mode: 'insert' });
-  const monacoAfterWrite = await callOn('monaco-dom.html', { type: 'read' });
-  check('Monaco 形态：普通写入自动退到真键盘并校验成功',
-    monacoWrite.ok === true && monacoWrite.result?.verified === true && flat(monacoAfterWrite.editor?.text || '').trimEnd() === flat(monacoTypedText).trimEnd(),
-    monacoWrite.ok ? `method=${monacoWrite.result?.method} verified=${monacoWrite.result?.verified} text=${JSON.stringify(flat(monacoAfterWrite.editor?.text || '').slice(0, 24))}` : `${monacoWrite.code}: ${monacoWrite.error}`);
-
-  // ---- 17b. 覆盖写入前先备份原文，写坏了能一键恢复
-  const undoSession = await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/monaco-dom.html`, 'undo');
-  await sleep(1000);
-  await cdp.send('Page.bringToFront', {}, undoSession);
-  const undoOriginal = await evaluateOn(undoSession, 'window.__monacoCode()');
-  const undoPopup = await openPage(`chrome-extension://${extensionId}/popup.html`, 'undo-popup');
-  await sleep(1100);
-  const undoEval = (expression) => evaluateOn(undoPopup, expression);
-  await cdp.send('Page.bringToFront', {}, undoPopup);
-  await undoEval(`(() => { document.getElementById('pasteInput').value = 'print("overwrite test");'; return true; })()`);
-  await undoEval(`(() => { document.getElementById('pasteBtn').click(); return true; })()`);
-  await sleep(6000);
-  const afterWrite = await evaluateOn(undoSession, 'window.__monacoCode()');
-  const undoVisible = await undoEval(`!document.getElementById('undoBtn').classList.contains('hidden')`);
-  check('覆盖写入前先备份原文，撤销按钮出现',
-    undoVisible === true && String(afterWrite).includes('overwrite test'),
-    `undoVisible=${undoVisible} 写入结果=${JSON.stringify(String(afterWrite).slice(0, 28))}`);
-
-  await undoEval(`(() => { document.getElementById('undoBtn').click(); return true; })()`);
-  await sleep(6000);
-  const restoredCode = await evaluateOn(undoSession, 'window.__monacoCode()');
-  check('“恢复写入前的代码”能把原代码写回去',
-    flat(restoredCode).trim() === flat(undoOriginal).trim(),
-    `恢复 ${String(restoredCode).length} / 原 ${String(undoOriginal).length} 字符`);
-
-  // ---- 17. 点不到编辑器时必须明确报错，而不是偷偷复制“屏幕上可见的几行”
+  // ---- 14. 编辑器被遮罩挡住时报错
   const overlaySession = await openPage(`http://127.0.0.1:${HTTP_PORT}/test/fixtures/monaco-blocked.html`, 'blocked');
   await sleep(900);
   await cdp.send('Page.bringToFront', {}, overlaySession);

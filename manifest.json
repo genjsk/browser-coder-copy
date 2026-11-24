@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "头歌代码复制助手",
-  "version": "1.0.0",
-  "description": "解除头歌等页面的复制/粘贴限制：读取在线编辑器代码、可信粘贴、页面脚本执行。",
+  "name": "网页代码复制助手",
+  "version": "1.1.0",
+  "description": "复制头歌及其他网站的在线编辑器、网页代码块和选中文字。",
   "minimum_chrome_version": "116",
   "permissions": [
     "activeTab",
@@ -21,7 +21,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "头歌代码复制助手",
+    "default_title": "网页代码复制助手",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",

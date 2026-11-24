@@ -3,21 +3,21 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>头歌代码复制助手</title>
+  <title>网页代码复制助手</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <header class="topbar">
     <img class="logo" src="icons/icon48.png" alt="">
     <div class="titles">
-      <h1>头歌代码复制助手</h1>
+      <h1>网页代码复制助手</h1>
       <p id="pageInfo" class="page-info">正在读取当前标签页…</p>
     </div>
     <span id="statusDot" class="status-dot" title="状态"></span>
   </header>
 
   <div id="consentBanner" class="consent hidden">
-    <p><b>需要一次性授权。</b>“可信粘贴”和“执行脚本”使用 Chrome 调试接口（CDP）把文本当作真实键盘输入送进页面，因此会看到一条“正在调试此浏览器”的提示条，这是 Chrome 的正常提示。</p>
+    <p>使用“强制读取”需要一次性授权。浏览器会暂时显示正在调试的提示。</p>
     <button id="consentBtn" class="btn primary block">同意并启用调试权限</button>
   </div>
 
@@ -28,50 +28,19 @@
         <span id="editorBadge" class="badge">未检测</span>
       </div>
       <div id="pickRow" class="row pick-row hidden">
-        <label class="hint" for="editorPick">编辑器</label>
+        <label class="hint" for="editorPick">代码来源</label>
         <select id="editorPick" class="picker"></select>
       </div>
       <div class="row">
-        <button id="readBtn" class="btn">读取编辑器</button>
+        <button id="readBtn" class="btn">读取代码</button>
         <button id="copyBtn" class="btn primary" disabled>复制到剪贴板</button>
       </div>
       <div class="row">
+        <button id="readSelectionBtn" class="btn tiny">读取选中文字</button>
         <button id="forceReadBtn" class="btn tiny">强制读取（Ctrl+A/C）</button>
-        <span class="hint">代码只画在屏幕上、HTML 里读不到时用这个</span>
       </div>
-      <textarea id="codeView" class="editor-view" spellcheck="false" readonly placeholder="点“读取编辑器”抓取页面里的代码（Monaco / CodeMirror / Ace / 文本框都支持）"></textarea>
+      <textarea id="codeView" class="editor-view" spellcheck="false" readonly placeholder="这里显示网页编辑器、代码块或选中的文字"></textarea>
       <p id="readMeta" class="meta"></p>
-    </section>
-
-    <section class="card">
-      <div class="card-head">
-        <h2>代码写入</h2>
-        <span class="hint">从剪贴板/本地贴进网页 IDE</span>
-      </div>
-      <textarea id="pasteInput" class="editor-view" spellcheck="false" placeholder="把本地代码粘到这里，或用下面的按钮直接从剪贴板取"></textarea>
-      <div class="row">
-        <button id="clipBtn" class="btn">读取剪贴板</button>
-        <label class="check" title="勾选后写入前会先 Ctrl+A 全选，用新代码替换整篇"><input id="replaceAll" type="checkbox" checked> 先全选覆盖（会清空原代码）</label>
-        <label class="check"><input id="typeKeys" type="checkbox"> 逐字键入（兼容更严格）</label>
-      </div>
-      <button id="pasteBtn" class="btn primary block">写入网页编辑器</button>
-      <div class="row">
-        <button id="forcePasteBtn" class="btn tiny">强制写入（Ctrl+V）</button>
-        <button id="typeWriteBtn" class="btn tiny">逐字键入写入（模拟打字）</button>
-        <button id="undoBtn" class="btn tiny hidden">恢复写入前的代码</button>
-      </div>
-      <p class="hint">代码区读不到、编辑器找不到时用“强制写入”；平台提示“禁止复制粘贴”时用“逐字键入”。</p>
-      <p id="pasteResult" class="meta"></p>
-    </section>
-
-    <section class="card">
-      <div class="card-head">
-        <h2>执行脚本</h2>
-        <span class="hint">在页面主环境运行</span>
-      </div>
-      <textarea id="evalInput" class="editor-view small" spellcheck="false" placeholder="例如：document.title / monaco.editor.getEditors()[0].getValue()"></textarea>
-      <button id="evalBtn" class="btn block">执行</button>
-      <pre id="evalResult" class="output hidden"></pre>
     </section>
 
     <section class="card">
@@ -96,7 +65,7 @@
   </main>
 
   <footer class="footer">
-    <span>编辑类页面请先点一下编辑器内任意位置</span>
+    <span>页面有多个代码区时，可以从「代码来源」下拉框选择。</span>
   </footer>
 
   <script src="popup.js" type="module"></script>

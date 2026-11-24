@@ -1,4 +1,12 @@
-// 头歌代码复制助手 · 弹窗逻辑
+// 网页代码复制助手 · 弹窗逻辑
+
+function normalizeText(text) {
+  const normalized = String(text ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u00a0\u2000-\u200a\u202f\u205f\u3000]/g, ' ')
+    .replace(/\u200b/g, '');
+  return /^([\w-]+\.)*educoder\.net(?::\d+)?$/i.test(hostOf()) ? normalized.replace(/NBSP/g, ' ') : normalized;
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -11,22 +19,11 @@ const els = {
   pickRow: $('pickRow'),
   editorPick: $('editorPick'),
   readBtn: $('readBtn'),
+  readSelectionBtn: $('readSelectionBtn'),
   copyBtn: $('copyBtn'),
   forceReadBtn: $('forceReadBtn'),
   codeView: $('codeView'),
   readMeta: $('readMeta'),
-  pasteInput: $('pasteInput'),
-  clipBtn: $('clipBtn'),
-  replaceAll: $('replaceAll'),
-  typeKeys: $('typeKeys'),
-  pasteBtn: $('pasteBtn'),
-  forcePasteBtn: $('forcePasteBtn'),
-  typeWriteBtn: $('typeWriteBtn'),
-  undoBtn: $('undoBtn'),
-  pasteResult: $('pasteResult'),
-  evalInput: $('evalInput'),
-  evalBtn: $('evalBtn'),
-  evalResult: $('evalResult'),
   unlockToggle: $('unlockToggle'),
   diagBtn: $('diagBtn'),
   diagCopyBtn: $('diagCopyBtn'),
@@ -39,6 +36,7 @@ const TYPE_LABELS = {
   codemirror5: 'CodeMirror 5',
   codemirror6: 'CodeMirror 6',
   ace: 'Ace 编辑器',
+  codeblock: '网页代码块',
   textarea: '文本框',
   contenteditable: '可编辑区域'
 };
@@ -49,10 +47,12 @@ const ACTIVE = 'active';
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 let tab = null;
-let settings = { debugConsent: false, unlock: true, typingDelayMs: 3 };
-// choice 是“读哪个编辑器”的定位：{ type, nth, frameId }，null 表示自动挑最大的那个。
-// 读取、写入、诊断共用同一个 choice，避免“读 A 写 B”。
+let settings = { debugConsent: false, unlock: true };
+// choice 是代码来源的定位：{ type, nth, frameId }，null 表示自动识别。
+// 读取和诊断使用同一份编辑器选择。
 let choice = null;
+let previewRequest = 0;
+let partialSource = null;
 
 function setDot(state, title) {
   els.statusDot.className = `status-dot ${state || ''}`.trim();
@@ -83,21 +83,16 @@ function request(message) {
 
 function describeFailure(response) {
   const map = {
-    RESTRICTED_PAGE: '当前页面受浏览器保护，无法注入脚本（请打开头歌的题目页面）。',
+    RESTRICTED_PAGE: '当前页面受浏览器保护。请打开普通网页后再试。',
     NO_TAB: '没有找到活动标签页。',
     DEBUG_CONSENT_REQUIRED: '请先点击上方“同意并启用调试权限”。',
     DEBUGGER_BUSY: '该标签页被 DevTools 占用，请先关闭 F12 再试。',
     DEBUGGER_ATTACH_FAILED: '无法连接调试器，请刷新页面或重新加载扩展。',
     DEBUGGER_PERMISSION_REQUIRED: '扩展缺少调试权限，请到 chrome://extensions 重新加载。',
-    TEXT_REQUIRED: '没有可写入的内容，请先粘贴代码或读取剪贴板。',
-    TEXT_TOO_LARGE: '文本过大，请分段写入。',
-    EXPRESSION_REQUIRED: '请输入要执行的脚本。',
-    EVAL_EXCEPTION: '脚本抛出了异常。',
-    INPUT_FAILED: '可信输入失败。',
-    EDITOR_NOT_FOUND: '你选的编辑器已经不在页面上了（页面结构或序号变了），请在“编辑器”下拉框里重新选一次。',
+    EDITOR_NOT_FOUND: '你选的代码区已经不在页面上了，请在“代码来源”下拉框里重新选择。',
     NO_ACTIVE_EDITOR: '没找到光标所在的编辑器：先在页面里点一下代码区再试；如果代码区是画布/封闭组件，直接用“强制读取（Ctrl+A/C）”（弹窗抢走焦点不影响，扩展会记住你最近点的编辑器）。',
-    FOCUS_NOT_IN_EDITOR: '点不到代码区：焦点没进编辑器（页面可能有遮罩或浮层挡住了自动点击）。请先在页面里手动点一下代码，再重试；读不到就用“强制读取（Ctrl+A/C）”，写入用“逐字键入写入（模拟打字）”。',
-    NO_EDITOR: '页面上没有识别到可编辑的编辑器（有些代码区只把文字渲染在屏幕上，DOM 里读不到）。点一下代码区，然后用“强制读取（Ctrl+A/C）”；写入用“强制写入（Ctrl+V）”。'
+    FOCUS_NOT_IN_EDITOR: '焦点没进入代码区，页面可能有遮罩。请在页面里点一下代码正文，再试一次。',
+    NO_EDITOR: '没有识别到编辑器。请先点一下代码区，再用“强制读取（Ctrl+A/C）”。'
   };
   const base = map[response.code] || response.error || '操作失败。';
   return response.code && map[response.code] ? base : `${base}${response.code ? `（${response.code}）` : ''}`;
@@ -169,7 +164,7 @@ function renderPicker(editor) {
 
   const auto = document.createElement('option');
   auto.value = '';
-  auto.textContent = '自动（挑最大的可编辑区）';
+  auto.textContent = '自动识别代码区';
   els.editorPick.append(auto);
 
   const active = document.createElement('option');
@@ -210,9 +205,9 @@ function renderPicker(editor) {
 
 // 读取失败（比如“当前光标”模式下页面没有焦点）时，仍然把候选渲染出来，
 // 让用户可以直接在下拉框里换一个编辑器，而不是对着空白下拉框干瞪眼。
-async function refreshPicker() {
+async function refreshPicker(requestId = previewRequest) {
   const response = await request({ type: 'diagnose', spec: choice });
-  if (!response.ok) return;
+  if (!response.ok || requestId !== previewRequest) return;
   const diagnosis = response.diagnosis || {};
   const editor = diagnosis.editor || null;
   renderPicker({
@@ -253,34 +248,40 @@ async function readEditor({ auto = false } = {}) {
     setMeta(els.readMeta, '没有活动标签页。', 'err');
     return;
   }
+  const requestId = ++previewRequest;
   els.readBtn.disabled = true;
   if (!auto) setMeta(els.readMeta, '正在读取…');
   const response = await request({ type: 'read', spec: choice });
   els.readBtn.disabled = false;
+  if (requestId !== previewRequest) return;
 
   if (!response.ok) {
-    badge('未检测到编辑器', 'miss');
+    partialSource = null;
+    badge('读取失败', 'miss');
+    els.codeView.value = '';
+    els.copyBtn.disabled = true;
     setMeta(els.readMeta, describeFailure(response), 'err');
     setDot('warn', '读取失败');
-    await refreshPicker();
+    await refreshPicker(requestId);
     return;
   }
 
   const editor = response.editor;
   if (!editor || !editor.type) {
-    badge('未检测到编辑器', 'miss');
+    partialSource = null;
+    badge('未检测到代码区', 'miss');
+    els.codeView.value = '';
     els.copyBtn.disabled = true;
-    setMeta(els.readMeta, '没有识别到编辑器。请先点一下页面里的代码编辑区，再点“读取编辑器”。');
-    setDot('warn', '未识别到编辑器');
+    setMeta(els.readMeta, '没有识别到代码区。可以在网页上选中文字，再点“读取选中文字”。');
+    setDot('warn', '未识别到代码区');
     return;
   }
 
-  // 页面刷新后序号会变：如果选中的编辑器已经不存在，后台会退回到自动选择，
-  // 这里把 choice 同步成实际读到的那个，写入才会落在同一个编辑区。
-  // “当前焦点”是动态目标，不固化成具体类型。
+  // 页面刷新后子框架编号可能变化。同步到读到的来源，但保留“当前焦点”模式。
   if (choice && choice.type !== ACTIVE && (editor.type !== choice.type || editor.nth !== choice.nth || (choice.frameId != null && editor.frameId !== choice.frameId))) {
     choice = { type: editor.type, nth: editor.nth, frameId: editor.frameId };
     await saveChoice(choice);
+    if (requestId !== previewRequest) return;
   }
 
   renderPicker(editor);
@@ -288,58 +289,66 @@ async function readEditor({ auto = false } = {}) {
   const label = TYPE_LABELS[editor.type] || editor.type;
   const suffix = editor.editorCount > 1 ? ` #${(editor.nth || 0) + 1}` : '';
   badge(`${label}${suffix}`, 'ok');
-  els.codeView.value = editor.text || '';
-  els.copyBtn.disabled = !editor.text;
+  const text = normalizeText(editor.text);
+  partialSource = editor.partial
+    ? { type: editor.type, nth: editor.nth, frameId: editor.frameId, visibleText: text }
+    : null;
+  els.codeView.value = text;
+  els.copyBtn.disabled = !text && !partialSource;
   const chars = (editor.text || '').length;
   const lines = (editor.text || '').split('\n').length;
   const via = editor.via === 'cdp' ? '，调试通道读取' : '';
   const frame = editor.frameId > 0 ? `，子框架 #${editor.frameId}` : '';
-  const others = editor.editorCount > 1 ? `，共 ${editor.editorCount} 个可编辑区` : '';
+  const others = editor.editorCount > 1 ? `，共 ${editor.editorCount} 个来源` : '';
   if (editor.partial) {
     // Monaco 只把当前视口的行渲染进 DOM，DOM 里读不到整份文档。
-    // 用户点“读取编辑器”（不是自动读取）时，直接用键盘通道把全文拿回来，省一步。
+    // 用户手动读取时，尝试用键盘通道读取全文。
     if (!auto && settings.debugConsent) {
-      setMeta(els.readMeta, '这个编辑器只把屏幕上的行写进了 HTML，正在用键盘通道读全文…');
-      setDot('', '正在读全文');
-      const full = await readPageViaKeyboard();
-      if (full.ok && full.text && full.text.length > chars) {
-        els.codeView.value = full.text;
-        els.copyBtn.disabled = false;
-        badge('键盘读取', 'ok');
-        setMeta(
-          els.readMeta,
-          `${full.text.length} 字符 / ${full.text.split('\n').length} 行${frame}${others} · ${full.label}（DOM 里只有 ${chars} 字符）`,
-          'ok',
-        );
-        setDot('ok', '已通过键盘复制读取全文');
-        return;
-      }
-      setMeta(
-        els.readMeta,
-        `${chars} 字符 / ${lines} 行${frame}${others}：这个编辑器只把屏幕上这几行写进了 HTML，全文请点“强制读取（Ctrl+A/C）”。`,
-        'warn',
-      );
-      setDot('warn', '只读到可见部分');
+      await forceReadByKeyboard();
       return;
     }
     setMeta(
       els.readMeta,
-      `${chars} 字符 / ${lines} 行${frame}${others}：这个编辑器只把屏幕上这几行写进了 HTML，点“读取编辑器”或“强制读取（Ctrl+A/C）”可拿全文。`,
+      `${chars} 字符 / ${lines} 行${frame}${others}：以下是可见行预览，点击“复制到剪贴板”会尝试从编辑器读取全文。`,
       'warn',
     );
     setDot('warn', '只读到可见部分');
     return;
   }
   setMeta(els.readMeta, `${chars} 字符 / ${lines} 行${frame}${others}${via}${auto ? '' : '。已读取，可复制。'}`, 'ok');
-  setDot('ok', '已读取编辑器');
+  setDot('ok', '已读取代码');
+}
+
+async function readSelection() {
+  const requestId = ++previewRequest;
+  els.readSelectionBtn.disabled = true;
+  const response = await request({ type: 'read-selection' });
+  els.readSelectionBtn.disabled = false;
+  if (requestId !== previewRequest) return;
+  if (!response.ok) {
+    setMeta(els.readMeta, describeFailure(response), 'warn');
+    return;
+  }
+  const text = normalizeText(response.text);
+  partialSource = null;
+  els.codeView.value = text;
+  els.copyBtn.disabled = !text;
+  badge('网页选区', 'ok');
+  setMeta(els.readMeta, `已读取选中的 ${text.length} 字符，可复制。`, 'ok');
+  setDot('ok', '已读取网页选区');
 }
 
 async function copyOut() {
-  const text = els.codeView.value;
+  if (partialSource) {
+    await forceReadByKeyboard();
+    return;
+  }
+  const text = normalizeText(els.codeView.value);
   if (!text) {
     setMeta(els.readMeta, '还没有可复制的内容。', 'err');
     return;
   }
+  els.codeView.value = text;
   try {
     await navigator.clipboard.writeText(text);
     setMeta(els.readMeta, `已复制 ${text.length} 字符到剪贴板。`, 'ok');
@@ -354,19 +363,6 @@ async function copyOut() {
   }
 }
 
-async function readClipboard() {
-  try {
-    const text = await navigator.clipboard.readText();
-    if (!text) {
-      setMeta(els.pasteResult, '剪贴板是空的。', 'warn');
-      return;
-    }
-    els.pasteInput.value = text;
-    setMeta(els.pasteResult, `已从剪贴板读取 ${text.length} 字符。`);
-  } catch (error) {
-    setMeta(els.pasteResult, `读不了剪贴板（${error?.message || error}），请手动 Ctrl+V 到上面的输入框。`, 'err');
-  }
-}
 
 // ---- 键盘剪贴板通道 -------------------------------------------------------
 
@@ -378,292 +374,98 @@ async function clipboardText() {
   }
 }
 
-function normalizeText(value) {
-  return String(value == null ? '' : value).replace(/\r\n?/g, '\n');
+// 纯文本剪贴板可临时打标，区分“又复制了同一份代码”和“根本没有复制”。
+async function markPlainClipboard(before) {
+  if (!before.ok || !before.text) return null;
+  try {
+    const items = await navigator.clipboard.read();
+    if (items.length !== 1 || items[0].types.length !== 1 || items[0].types[0] !== 'text/plain') return null;
+    if (await (await items[0].getType('text/plain')).text() !== before.text) return null;
+    const marker = `[code-copy:${crypto.randomUUID()}]`;
+    await navigator.clipboard.writeText(marker);
+    return marker;
+  } catch {
+    return null;
+  }
 }
 
-// 先用页面自己的复制实现（CodeMirror / Monaco 都靠自己的复制逻辑写剪贴板），
-// 不行再退回“浏览器原生复制选区”。两种都试，谁先让剪贴板变化谁赢。
-async function readPageViaKeyboard() {
+// 优先尝试编辑器自带的复制，必要时再尝试浏览器原生复制。
+async function readPageViaKeyboard(partial) {
   const before = await clipboardText();
+  const marker = partial ? await markPlainClipboard(before) : null;
   const attempts = [
     { shield: false, label: '页面自身复制' },
     { shield: true, label: '浏览器原生复制' }
   ];
-  for (const attempt of attempts) {
-    const response = await request({ type: 'keycopy', shield: attempt.shield });
-    if (!response.ok) continue;
-    await sleep(350);
-    const after = await clipboardText();
-    if (after.ok && after.text && (!before.ok || after.text !== before.text)) {
-      return { ok: true, text: after.text, label: attempt.label };
+  const source = partial ? { type: partial.type, nth: partial.nth, frameId: partial.frameId } : null;
+  const visibleLength = partial?.visibleText?.replace(/\s/g, '').length || 0;
+  let failure = null;
+  try {
+    for (const attempt of attempts) {
+      const response = await request({ type: 'keycopy', shield: attempt.shield, source });
+      if (!response.ok) {
+        failure = response;
+        continue;
+      }
+      await sleep(350);
+      const after = await clipboardText();
+      if (!after.ok || !after.text || after.text === (marker ?? before.text)) continue;
+      const text = normalizeText(after.text);
+      const copiedLength = text.replace(/\s/g, '').length;
+      if (!text || copiedLength < visibleLength) continue;
+      // 浏览器原生全选可能只复制了可见行。
+      const mayBePartial = visibleLength > 0 && copiedLength === visibleLength;
+      if (attempt.shield && mayBePartial) continue;
+      if (text !== after.text) {
+        try { await navigator.clipboard.writeText(text); } catch {}
+      }
+      return { ok: true, text, label: attempt.label, mayBePartial };
+    }
+  } finally {
+    if (marker && (await clipboardText()).text === marker) {
+      try { await navigator.clipboard.writeText(before.text); } catch {}
     }
   }
-  return { ok: false, error: '两次复制都没有产生新内容' };
+  return failure || { ok: false, error: '没有从编辑器取得可确认的内容。请先在网页里点一下代码正文，再试一次。' };
 }
 
 // DOM 里读不到编辑器时的兜底：让页面自己“全选 + 复制”，再从剪贴板把文本取回来。
 // 这条路绕开了 DOM 与编辑器实例，所以对 canvas 渲染、closed shadow root、
 // 注入不进去的跨域 iframe 都成立——只要页面的复制还能用。
 async function forceReadByKeyboard() {
+  if (els.forceReadBtn.disabled) return;
   if (!settings.debugConsent) {
     els.consentBanner.classList.remove('hidden');
     setMeta(els.readMeta, '需要先同意启用调试权限。', 'err');
     return;
   }
+  const requestId = ++previewRequest;
+  const partial = partialSource;
   els.forceReadBtn.disabled = true;
   setMeta(els.readMeta, '正在模拟 Ctrl+A / Ctrl+C…（页面会自动切到前台）');
   setDot('', '正在读取');
-  const result = await readPageViaKeyboard();
+  const result = await readPageViaKeyboard(partial);
   els.forceReadBtn.disabled = false;
+  if (requestId !== previewRequest) return;
   if (!result.ok) {
-    setMeta(els.readMeta, 'Ctrl+A / Ctrl+C 没有拿到任何新内容：先在页面里点一下代码区再试。如果代码区是画布、平台又把“复制”整个禁掉了，浏览器就拿不到文字——这种情况扩展也读不出来。', 'warn');
+    const hint = partial ? ' 当前预览仍可能缺少后续行。' : '';
+    setMeta(els.readMeta, describeFailure(result) + hint, 'warn');
     setDot('warn', '没有读到内容');
     return;
   }
-  els.codeView.value = result.text;
+  partialSource = result.mayBePartial ? partial : null;
+  els.codeView.value = normalizeText(result.text);
   els.copyBtn.disabled = false;
-  badge('键盘读取', 'ok');
   const lines = result.text.split('\n').length;
+  if (result.mayBePartial) {
+    badge('可见行', 'miss');
+    setMeta(els.readMeta, `已复制 ${lines} 行，与预览长度一致，无法确认是否还有后续行。`, 'warn');
+    setDot('warn', '可能仅复制到可见行');
+    return;
+  }
+  badge('键盘读取', 'ok');
   setMeta(els.readMeta, `${result.text.length} 字符 / ${lines} 行 · ${result.label}`, 'ok');
   setDot('ok', '已通过键盘复制读取');
-}
-
-// 反向兜底：先把代码放进系统剪贴板，再让页面自己 Ctrl+V。
-// 头歌这类平台会拦 paste 并弹“禁止复制粘贴”，这时页面内容不会变；一旦回读发现
-// 原封不动，就自动换成逐字键入（真按键），不用再点第二个按钮。
-async function forcePasteByKeyboard() {
-  const text = els.pasteInput.value;
-  if (!text.trim()) {
-    setMeta(els.pasteResult, '请先粘贴要写入的代码。', 'err');
-    return;
-  }
-  if (!settings.debugConsent) {
-    els.consentBanner.classList.remove('hidden');
-    setMeta(els.pasteResult, '需要先同意启用调试权限。', 'err');
-    return;
-  }
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (error) {
-    setMeta(els.pasteResult, `写不了剪贴板：${error?.message || error}`, 'err');
-    return;
-  }
-  els.forcePasteBtn.disabled = true;
-  setMeta(els.pasteResult, '正在用 Ctrl+V 写入…（页面会自动切到前台）');
-  setDot('', '正在写入');
-  const replace = els.replaceAll.checked;
-  const original = await readPageViaKeyboard();
-  let verified = null;
-  let label = '';
-  let failure = null;
-  let typed = false;
-  for (const attempt of [{ shield: false, label: '页面自身粘贴' }, { shield: true, label: '浏览器原生粘贴' }]) {
-    const response = await request({ type: 'keypaste', replace, shield: attempt.shield });
-    if (!response.ok) {
-      failure = response;
-      break;
-    }
-    label = attempt.label;
-    await sleep(400);
-    const back = await readPageViaKeyboard();
-    if (!back.ok) {
-      // 读不回来就没法判断，宁可不再试第二次，避免同一段代码被插两遍。
-      verified = null;
-      break;
-    }
-    const same = replace
-      ? normalizeText(back.text) === normalizeText(text)
-      : normalizeText(back.text).includes(normalizeText(text));
-    if (same) {
-      verified = true;
-      break;
-    }
-    verified = false;
-    const untouched = original.ok && normalizeText(back.text) === normalizeText(original.text);
-    if (!untouched) continue; // 已经插进别的东西了，别再粘贴一次
-    // 粘贴被平台拦住了：改用真按键逐字敲，不会触发 paste 检测。
-    const typedResponse = await request({ type: 'keytype', text, replace });
-    if (typedResponse.ok) {
-      typed = true;
-      label = '逐字键入（平台拦了粘贴）';
-      const after = await readPageViaKeyboard();
-      verified = after.ok ? (normalizeText(after.text) === normalizeText(text) ? true : null) : null;
-    }
-    break;
-  }
-  els.forcePasteBtn.disabled = false;
-  if (failure) {
-    setMeta(els.pasteResult, describeFailure(failure), 'err');
-    setDot('warn', '强制写入失败');
-    return;
-  }
-  const parts = [
-    typed ? `已逐字键入 ${text.length} 字符（${label}）` : `已发送 Ctrl+V（${label || '键盘通道'}）：${text.length} 字符`,
-    replace ? '已先全选覆盖' : '插在光标处',
-    verified === true ? '回读一致' : verified === false ? '回读不一致' : '无法回读校验'
-  ];
-  setMeta(els.pasteResult, parts.join(' · '), verified === false ? 'warn' : verified === null ? '' : 'ok');
-  setDot(verified === true ? 'ok' : 'warn', verified === true ? '写入成功' : typed ? '已键入' : '写入可能没生效');
-  if (verified === false) {
-    setMeta(els.pasteResult, `${parts.join(' · ')}。如果平台弹了“禁止复制粘贴”，改用“逐字键入写入（模拟打字）”。`, 'warn');
-  }
-}
-
-// 第三条路：完全不碰剪贴板，像真人一样逐字敲进去。
-// 平台拦的是“粘贴事件 / insertFromPaste”，对真实按键通常无感。
-async function typeWrite() {
-  const text = els.pasteInput.value;
-  if (!text.trim()) {
-    setMeta(els.pasteResult, '请先粘贴要写入的代码。', 'err');
-    return;
-  }
-  if (!settings.debugConsent) {
-    els.consentBanner.classList.remove('hidden');
-    setMeta(els.pasteResult, '需要先同意启用调试权限。', 'err');
-    return;
-  }
-  els.typeWriteBtn.disabled = true;
-  setMeta(els.pasteResult, `正在逐字键入 ${text.length} 字符…（页面会自动切到前台，大段代码会慢一些）`);
-  setDot('', '正在键入');
-  const response = await request({ type: 'keytype', text, replace: els.replaceAll.checked });
-  els.typeWriteBtn.disabled = false;
-  if (!response.ok) {
-    setMeta(els.pasteResult, describeFailure(response), 'err');
-    setDot('warn', '键入失败');
-    return;
-  }
-  const chars = response.result?.chars ?? text.length;
-  setMeta(els.pasteResult, `已逐字键入 ${chars} 字符 · 走的是真实按键，平台检测“粘贴”时拦不住；编辑器若有自动补全，请核对一下结果`, 'ok');
-  setDot('ok', '已键入');
-}
-
-// 覆盖写入是破坏性操作：动手前先把页面上的原文读一份下来，
-// 写入后校验不一致就自动写回去，平时也能用“恢复写入前的代码”手动撤销。
-let writeBackup = null;
-
-async function snapshotBeforeWrite(replace) {
-  if (!replace || !settings.debugConsent) return null;
-  try {
-    const before = await readPageViaKeyboard();
-    if (before.ok && before.text && before.text.trim()) return before.text;
-  } catch {}
-  return null;
-}
-
-async function showUndo() {
-  els.undoBtn.classList.toggle('hidden', !writeBackup);
-}
-
-async function undoWrite() {
-  if (!writeBackup) return;
-  if (!settings.debugConsent) {
-    els.consentBanner.classList.remove('hidden');
-    return;
-  }
-  els.undoBtn.disabled = true;
-  setMeta(els.pasteResult, '正在恢复写入前的代码…');
-  const restored = await request({ type: 'keytype', text: writeBackup, spec: choice, replace: true });
-  els.undoBtn.disabled = false;
-  if (restored.ok) {
-    setMeta(els.pasteResult, `已恢复写入前的代码（${writeBackup.length} 字符）。`, 'ok');
-    setDot('ok', '已恢复原代码');
-    writeBackup = null;
-    await showUndo();
-  } else {
-    setMeta(els.pasteResult, `恢复失败：${describeFailure(restored)}`, 'err');
-    setDot('warn', '恢复失败');
-  }
-}
-
-async function pasteIn() {
-  const text = els.pasteInput.value;
-  if (!text.trim()) {
-    setMeta(els.pasteResult, '请先粘贴要写入的代码。', 'err');
-    return;
-  }
-  if (!settings.debugConsent) {
-    els.consentBanner.classList.remove('hidden');
-    setMeta(els.pasteResult, '需要先同意启用调试权限。', 'err');
-    return;
-  }
-  els.pasteBtn.disabled = true;
-  setMeta(els.pasteResult, '正在写入…（页面会自动切到前台）');
-  writeBackup = await snapshotBeforeWrite(els.replaceAll.checked);
-  await showUndo();
-  const response = await request({
-    type: 'paste',
-    text,
-    spec: choice,
-    replace: els.replaceAll.checked,
-    mode: els.typeKeys.checked ? 'keys' : 'insert'
-  });
-  els.pasteBtn.disabled = false;
-
-  if (!response.ok) {
-    setMeta(els.pasteResult, describeFailure(response), 'err');
-    setDot('warn', '写入失败');
-    return;
-  }
-
-  const result = response.result;
-  const methodName = result.method === 'keys' ? '逐字键入' : result.method === 'setValue' ? '直接设值（回退）' : '可信插入';
-  const verified = result.verified === true ? '内容校验一致' : result.verified === false ? '内容校验不一致' : '未能校验';
-  const label = result.editorType ? TYPE_LABELS[result.editorType] || result.editorType : '';
-  const target = label ? `编辑器 ${label}${result.editorNth ? ` #${result.editorNth + 1}` : ''}` : '';
-  const parts = [
-    `写入完成：${result.chars} 字符，方式 ${methodName}`,
-    target,
-    verified,
-    result.warning
-  ].filter(Boolean);
-  if (result.verified === false && writeBackup) {
-    // 覆盖后内容和预期对不上（常常只写进去一部分），先把原文写回去，别把用户的代码弄丢。
-    setMeta(els.pasteResult, `${parts.join(' · ')}。内容对不上，正在恢复写入前的代码…`, 'warn');
-    const restored = await request({ type: 'keytype', text: writeBackup, spec: choice, replace: true });
-    if (restored.ok) {
-      setMeta(els.pasteResult, `${parts.join(' · ')}。已自动恢复写入前的代码（${writeBackup.length} 字符）。`, 'ok');
-      setDot('ok', '写入未通过校验，已恢复原代码');
-      writeBackup = null;
-      await showUndo();
-    } else {
-      setDot('warn', '写入校验不一致，恢复也失败');
-    }
-    return;
-  }
-  setMeta(els.pasteResult, parts.join(' · '), result.verified === false ? 'warn' : 'ok');
-  setDot(result.verified === false ? 'warn' : 'ok', result.verified === false ? '已写入但校验不一致' : '写入成功');
-  if (result.verified !== false) refreshPage();
-}
-
-async function runScript() {
-  const expression = els.evalInput.value;
-  if (!expression.trim()) {
-    els.evalResult.textContent = '请输入要执行的脚本。';
-    els.evalResult.classList.remove('hidden');
-    return;
-  }
-  if (!settings.debugConsent) {
-    els.consentBanner.classList.remove('hidden');
-    els.evalResult.textContent = '需要先同意启用调试权限。';
-    els.evalResult.classList.remove('hidden');
-    return;
-  }
-  els.evalBtn.disabled = true;
-  els.evalResult.textContent = '执行中…';
-  els.evalResult.classList.remove('hidden');
-  const response = await request({ type: 'eval', expression });
-  els.evalBtn.disabled = false;
-
-  if (!response.ok) {
-    els.evalResult.textContent = describeFailure(response);
-    setDot('warn', '脚本执行失败');
-    return;
-  }
-  const result = response.result;
-  const output = result.serialized !== undefined ? result.serialized : String(result.value);
-  els.evalResult.textContent = result.truncated ? `${output}\n…（已截断）` : output;
-  setDot('ok', '脚本已执行');
 }
 
 async function refreshDiagnosis() {
@@ -717,14 +519,9 @@ async function refreshDiagnosis() {
 
 function bind() {
   els.readBtn.addEventListener('click', () => readEditor());
+  els.readSelectionBtn.addEventListener('click', readSelection);
   els.copyBtn.addEventListener('click', copyOut);
   els.forceReadBtn.addEventListener('click', forceReadByKeyboard);
-  els.forcePasteBtn.addEventListener('click', forcePasteByKeyboard);
-  els.typeWriteBtn.addEventListener('click', typeWrite);
-  els.undoBtn.addEventListener('click', undoWrite);
-  els.clipBtn.addEventListener('click', readClipboard);
-  els.pasteBtn.addEventListener('click', pasteIn);
-  els.evalBtn.addEventListener('click', runScript);
   els.diagBtn.addEventListener('click', refreshDiagnosis);
   els.diagCopyBtn.addEventListener('click', async () => {
     const text = els.diagResult.textContent || '';
@@ -746,7 +543,7 @@ function bind() {
   els.consentBtn.addEventListener('click', async () => {
     await saveSetting({ debugConsent: true });
     els.consentBanner.classList.add('hidden');
-    setMeta(els.readMeta, '调试权限已启用，现在可以粘贴和执行脚本。', 'ok');
+    setMeta(els.readMeta, '已启用调试权限，可以使用强制读取。', 'ok');
   });
 
   els.unlockToggle.addEventListener('change', async () => {
@@ -756,14 +553,6 @@ function bind() {
       chrome.tabs.sendMessage(tab.id, { type: 'unlock-refresh' }, () => void chrome.runtime.lastError);
     }
     setMeta(els.readMeta, enabled ? '页面解锁已开启（刷新页面生效）。' : '页面解锁已关闭（刷新页面生效）。');
-  });
-
-  document.addEventListener('keydown', (event) => {
-    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-      event.preventDefault();
-      if (document.activeElement === els.pasteInput) pasteIn();
-      else runScript();
-    }
   });
 }
 
@@ -789,7 +578,7 @@ async function init() {
   choice = await loadChoice().catch(() => null);
   // 总是尝试读一次：成功就显示内容；失败（比如选了“当前焦点”但页面没焦点）
   // 也会把候选渲染进下拉框，用户可以直接换目标，而不是被卡住。
-  if (tab) await readEditor({ auto: true }).catch(() => {});
+  if (tab && previewRequest === 0) await readEditor({ auto: true }).catch(() => {});
 }
 
 init();
